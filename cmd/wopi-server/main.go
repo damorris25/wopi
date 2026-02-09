@@ -10,10 +10,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dmorris/wopi/internal/attrstore"
 	"github.com/dmorris/wopi/internal/config"
 	"github.com/dmorris/wopi/internal/handlers"
 	"github.com/dmorris/wopi/internal/middleware"
+	"github.com/dmorris/wopi/internal/platform"
 	"github.com/dmorris/wopi/internal/storage"
+	"github.com/dmorris/wopi/internal/tdf"
 	"github.com/dmorris/wopi/internal/wopi"
 )
 
@@ -29,7 +32,7 @@ func main() {
 	}
 
 	ctx := context.Background()
-	s3Store, err := storage.NewS3Storage(ctx, storage.S3Config{
+	s3Cfg := storage.S3Config{
 		Endpoint:       cfg.S3Endpoint,
 		Region:         cfg.S3Region,
 		Bucket:         cfg.S3Bucket,
@@ -37,7 +40,17 @@ func main() {
 		SecretAccessKey: cfg.S3SecretAccessKey,
 		UseSSL:         cfg.S3UseSSL,
 		ForcePathStyle: cfg.S3ForcePathStyle,
-	})
+	}
+	if cfg.S3BearerAuthEnabled {
+		s3Cfg.BearerAuth = &storage.BearerAuthConfig{
+			TokenURL:     cfg.S3BearerTokenURL,
+			ClientID:     cfg.S3BearerClientID,
+			ClientSecret: cfg.S3BearerClientSecret,
+			Logger:       logger,
+		}
+		logger.Info("S3 bearer auth enabled", "token_url", cfg.S3BearerTokenURL, "client_id", cfg.S3BearerClientID)
+	}
+	s3Store, err := storage.NewS3Storage(ctx, s3Cfg)
 	if err != nil {
 		logger.Error("failed to create S3 storage", "error", err)
 		os.Exit(1)
@@ -45,15 +58,115 @@ func main() {
 
 	lockMgr := wopi.NewLockManager(cfg.LockExpiration)
 	tokenValidator := middleware.NewTokenValidator(cfg.AccessTokenSecret)
+	attrStore := attrstore.New()
+
+	var platformClient *platform.Client
+	if cfg.PlatformEndpoint != "" && cfg.S3BearerAuthEnabled {
+		platformClient = platform.NewClient(platform.ClientConfig{
+			Endpoint:     cfg.PlatformEndpoint,
+			TokenURL:     cfg.S3BearerTokenURL,
+			ClientID:     cfg.S3BearerClientID,
+			ClientSecret: cfg.S3BearerClientSecret,
+		})
+		logger.Info("platform client enabled", "endpoint", cfg.PlatformEndpoint)
+	}
+
+	// Create per-user token store when both OIDC and S3 bearer auth are
+	// enabled so that each user's own token is forwarded to s4proxy.
+	var tokenStore *middleware.TokenStore
+	if cfg.OIDCEnabled && cfg.S3BearerAuthEnabled {
+		tokenStore = middleware.NewTokenStore(cfg.S3BearerTokenURL, cfg.OIDCClientID, cfg.OIDCClientSecret)
+		logger.Info("per-user token flow enabled")
+	}
+
+	// Create TDF decryptor when the platform endpoint is configured and
+	// fulfillable obligation FQNs are specified. This allows the WOPI
+	// server to decrypt TDF files that s4proxy refused to decrypt.
+	var tdfDecryptor *tdf.Decryptor
+	if cfg.PlatformEndpoint != "" && cfg.S3BearerAuthEnabled && len(cfg.TDFFulfillableObligationFQNs) > 0 {
+		tdfDecryptor, err = tdf.NewDecryptor(tdf.Config{
+			PlatformEndpoint:       cfg.PlatformEndpoint,
+			ClientID:               cfg.S3BearerClientID,
+			ClientSecret:           cfg.S3BearerClientSecret,
+			FulfillableObligations: cfg.TDFFulfillableObligationFQNs,
+			Logger:                 logger,
+		})
+		if err != nil {
+			logger.Error("failed to create TDF decryptor", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("TDF client-side decryption enabled",
+			"platform", cfg.PlatformEndpoint,
+			"fulfillable_obligations", cfg.TDFFulfillableObligationFQNs,
+		)
+	}
 
 	h := &handlers.Handler{
-		Storage:     s3Store,
-		LockManager: lockMgr,
-		Logger:      logger,
-		BaseURL:     cfg.BaseURL,
+		Storage:              s3Store,
+		LockManager:          lockMgr,
+		Logger:               logger,
+		BaseURL:              cfg.BaseURL,
+		WOPIClientURL:        cfg.WOPIClientURL,
+		WOPIClientEditorPath: cfg.WOPIClientEditorPath,
+		WOPISrcBaseURL:       cfg.WOPISrcBaseURL,
+		TokenValidator:       tokenValidator,
+		PlatformClient:       platformClient,
+		AttrStore:            attrStore,
+		TokenStore:           tokenStore,
+		TDFDecryptor:         tdfDecryptor,
 	}
 
 	mux := http.NewServeMux()
+
+	// Optionally set up OIDC middleware
+	var oidcMw *middleware.OIDCMiddleware
+	if cfg.OIDCEnabled {
+		sessions, err := middleware.NewSessionManager(cfg.SessionSecret, 8*time.Hour, true)
+		if err != nil {
+			logger.Error("failed to create session manager", "error", err)
+			os.Exit(1)
+		}
+
+		oidcMw, err = middleware.NewOIDCMiddleware(ctx, middleware.OIDCConfig{
+			IssuerURL:    cfg.OIDCIssuerURL,
+			ClientID:     cfg.OIDCClientID,
+			ClientSecret: cfg.OIDCClientSecret,
+			RedirectURL:  cfg.OIDCRedirectURL,
+		}, sessions, logger, tokenStore)
+		if err != nil {
+			logger.Error("failed to create OIDC middleware", "error", err)
+			os.Exit(1)
+		}
+
+		// Register OIDC callback and logout
+		mux.HandleFunc("GET /auth/callback", oidcMw.CallbackHandler)
+		mux.HandleFunc("GET /auth/logout", oidcMw.LogoutHandler)
+
+		logger.Info("OIDC authentication enabled", "issuer", cfg.OIDCIssuerURL, "client_id", cfg.OIDCClientID)
+	}
+
+	// Browser UI routes — protected by OIDC when enabled
+	if oidcMw != nil {
+		mux.Handle("GET /{$}", oidcMw.Protect(http.HandlerFunc(h.ServeUI)))
+		mux.Handle("GET /api/files", oidcMw.Protect(http.HandlerFunc(h.ListFiles)))
+		mux.Handle("GET /api/files/browse", oidcMw.Protect(http.HandlerFunc(h.ListFilesInFolder)))
+		mux.Handle("POST /api/files/upload", oidcMw.Protect(http.HandlerFunc(h.UploadFile)))
+		mux.Handle("DELETE /api/files", oidcMw.Protect(http.HandlerFunc(h.DeleteFileAPI)))
+		mux.Handle("GET /api/attributes", oidcMw.Protect(http.HandlerFunc(h.GetAttributes)))
+		mux.Handle("GET /api/editor", oidcMw.Protect(http.HandlerFunc(h.GetEditorURL)))
+		mux.Handle("GET /api/files/info", oidcMw.Protect(http.HandlerFunc(h.GetFileInfoAPI)))
+		mux.Handle("GET /api/files/download", oidcMw.Protect(http.HandlerFunc(h.DownloadFile)))
+	} else {
+		mux.HandleFunc("GET /{$}", h.ServeUI)
+		mux.HandleFunc("GET /api/files", h.ListFiles)
+		mux.HandleFunc("GET /api/files/browse", h.ListFilesInFolder)
+		mux.HandleFunc("POST /api/files/upload", h.UploadFile)
+		mux.HandleFunc("DELETE /api/files", h.DeleteFileAPI)
+		mux.HandleFunc("GET /api/attributes", h.GetAttributes)
+		mux.HandleFunc("GET /api/editor", h.GetEditorURL)
+		mux.HandleFunc("GET /api/files/info", h.GetFileInfoAPI)
+		mux.HandleFunc("GET /api/files/download", h.DownloadFile)
+	}
 
 	// Health check (no auth required)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -61,20 +174,22 @@ func main() {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 
-	// Token generation endpoint (for testing/integration)
-	mux.HandleFunc("POST /token", func(w http.ResponseWriter, r *http.Request) {
-		userID := r.URL.Query().Get("user_id")
-		fileID := r.URL.Query().Get("file_id")
-		if userID == "" || fileID == "" {
-			http.Error(w, "user_id and file_id required", http.StatusBadRequest)
-			return
-		}
-		token := tokenValidator.GenerateToken(userID, fileID)
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"access_token":"%s","access_token_ttl":%d}`, token, middleware.TokenTTL())
-	})
+	// Token generation endpoint — disabled when OIDC is enabled
+	if !cfg.OIDCEnabled {
+		mux.HandleFunc("POST /token", func(w http.ResponseWriter, r *http.Request) {
+			userID := r.URL.Query().Get("user_id")
+			fileID := r.URL.Query().Get("file_id")
+			if userID == "" || fileID == "" {
+				http.Error(w, "user_id and file_id required", http.StatusBadRequest)
+				return
+			}
+			token := tokenValidator.GenerateToken(userID, fileID)
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"access_token":"%s","access_token_ttl":%d}`, token, middleware.TokenTTL())
+		})
+	}
 
-	// WOPI endpoints (with auth middleware)
+	// WOPI endpoints (with HMAC auth middleware — unchanged)
 	authMiddleware := middleware.WOPIAuth(tokenValidator)
 	logMiddleware := middleware.RequestLogger(logger)
 
@@ -112,7 +227,7 @@ func main() {
 		}
 	}()
 
-	logger.Info("starting WOPI server", "addr", addr, "base_url", cfg.BaseURL)
+	logger.Info("starting WOPI server", "addr", addr, "base_url", cfg.BaseURL, "wopi_client", cfg.WOPIClientURL, "oidc_enabled", cfg.OIDCEnabled)
 	if err := server.ListenAndServe(); err != http.ErrServerClosed {
 		logger.Error("server error", "error", err)
 		os.Exit(1)

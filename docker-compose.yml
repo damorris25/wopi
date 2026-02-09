@@ -5,49 +5,25 @@ services:
       - "8080:8080"
     environment:
       WOPI_PORT: "8080"
-      WOPI_BASE_URL: "http://localhost:8080"
-      S3_ENDPOINT: "http://minio:9000"
+      WOPI_BASE_URL: "http://wopi-server:8080"
+      S3_ENDPOINT: "http://host.docker.internal:9000"
       S3_REGION: "us-east-1"
-      S3_BUCKET: "wopi-documents"
+      S3_BUCKET: "encryptedstorage"
       S3_ACCESS_KEY_ID: "minioadmin"
-      S3_SECRET_ACCESS_KEY: "minioadmin"
+      S3_SECRET_ACCESS_KEY: "rMxfdNJUzsx*Wor7"
       S3_USE_SSL: "false"
       S3_FORCE_PATH_STYLE: "true"
       WOPI_ACCESS_TOKEN_SECRET: "change-me-in-production"
-    depends_on:
-      minio:
-        condition: service_healthy
+      WOPI_CLIENT_URL: "http://localhost:9980"
 
-  minio:
-    image: minio/minio:latest
+  collabora:
+    image: collabora/code:latest
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "9980:9980"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    command: server /data --console-address ":9001"
-    volumes:
-      - minio-data:/data
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  # Creates the default bucket on startup
-  minio-init:
-    image: minio/mc:latest
-    depends_on:
-      minio:
-        condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-      mc alias set local http://minio:9000 minioadmin minioadmin;
-      mc mb local/wopi-documents --ignore-existing;
-      mc anonymous set download local/wopi-documents;
-      echo 'Bucket created successfully';
-      "
-
-volumes:
-  minio-data:
+      aliasgroup1: "http://wopi-server:8080"
+      username: "admin"
+      password: "admin"
+      extra_params: "--o:ssl.enable=false --o:ssl.termination=false"
+    cap_add:
+      - MKNOD

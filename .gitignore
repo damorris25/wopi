@@ -29,3 +29,9 @@ go.work.sum
 # OS files
 .DS_Store
 Thumbs.db
+
+# Local MinIO data
+start/
+
+# External vendor bundles
+virtru-secure-object-proxy-bundle_*/

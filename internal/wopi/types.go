@@ -28,6 +28,11 @@ type CheckFileInfoResponse struct {
 	UserCanRename bool `json:"UserCanRename,omitempty"`
 	UserCanNotWriteRelative bool `json:"UserCanNotWriteRelative,omitempty"`
 
+	// Collabora-specific restrictions (set by obligation enforcement)
+	DisableCopy   bool `json:"DisableCopy,omitempty"`
+	DisablePrint  bool `json:"DisablePrint,omitempty"`
+	DisableExport bool `json:"DisableExport,omitempty"`
+
 	// File URLs
 	CloseUrl    string `json:"CloseUrl,omitempty"`
 	DownloadUrl string `json:"DownloadUrl,omitempty"`

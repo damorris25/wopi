@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -19,12 +20,42 @@ type Config struct {
 	S3Bucket          string
 	S3AccessKeyID     string
 	S3SecretAccessKey string
-	S3UseSSL          bool
-	S3ForcePathStyle  bool // Required for most S3-compatible stores (MinIO, etc.)
+	S3UseSSL         bool
+	S3ForcePathStyle bool // Required for most S3-compatible stores (MinIO, etc.)
+
+	// S3 proxy bearer auth — when set, the WOPI server authenticates to
+	// the S3 endpoint using OIDC bearer tokens instead of static credentials.
+	S3BearerAuthEnabled bool
+	S3BearerTokenURL    string // OIDC token endpoint for client credentials grant
+	S3BearerClientID    string
+	S3BearerClientSecret string
 
 	// WOPI settings
 	AccessTokenSecret string        // Secret used to sign/verify access tokens
 	LockExpiration    time.Duration // Lock TTL (default 30 minutes per WOPI spec)
+
+	// WOPI client (editor) settings
+	WOPIClientURL        string // Base URL of the WOPI client (e.g., http://localhost:9980)
+	WOPIClientEditorPath string // Path appended to base URL (default: /browser/dist/cool.html)
+	WOPISrcBaseURL       string // Base URL used in WOPISrc for Collabora callbacks (defaults to BaseURL)
+
+	// OIDC settings (enabled when OIDC_ENABLED=true)
+	OIDCEnabled      bool
+	OIDCIssuerURL    string
+	OIDCClientID     string
+	OIDCClientSecret string
+	OIDCRedirectURL  string
+
+	// Session settings
+	SessionSecret string
+
+	// OpenTDF Platform endpoint (for attribute entitlements)
+	PlatformEndpoint string
+
+	// TDF fulfillable obligation FQNs — when set (along with PlatformEndpoint
+	// and S3BearerAuth), the WOPI server decrypts TDF files client-side using
+	// the OpenTDF SDK, declaring these obligations as fulfillable.
+	TDFFulfillableObligationFQNs []string
 }
 
 // LoadFromEnv loads configuration from environment variables.
@@ -70,8 +101,86 @@ func LoadFromEnv() (*Config, error) {
 		LockExpiration:    30 * time.Minute,
 	}
 
+	clientURL := getEnvOrDefault("WOPI_CLIENT_URL", "")
+	if clientURL == "" {
+		clientURL = getEnvOrDefault("COLLABORA_URL", "http://localhost:9980")
+	}
+	cfg.WOPIClientURL = clientURL
+	cfg.WOPIClientEditorPath = getEnvOrDefault("WOPI_CLIENT_EDITOR_PATH", "/browser/dist/cool.html")
+	cfg.WOPISrcBaseURL = getEnvOrDefault("WOPI_SRC_BASE_URL", "")
+
 	if cfg.S3Bucket == "" {
 		return nil, fmt.Errorf("S3_BUCKET is required")
+	}
+
+	// S3 bearer auth settings
+	s3BearerAuth := false
+	if v := os.Getenv("S3_BEARER_AUTH_ENABLED"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid S3_BEARER_AUTH_ENABLED: %w", err)
+		}
+		s3BearerAuth = b
+	}
+	cfg.S3BearerAuthEnabled = s3BearerAuth
+	cfg.S3BearerTokenURL = getEnvOrDefault("S3_BEARER_TOKEN_URL", "")
+	cfg.S3BearerClientID = getEnvOrDefault("S3_BEARER_CLIENT_ID", "")
+	cfg.S3BearerClientSecret = getEnvOrDefault("S3_BEARER_CLIENT_SECRET", "")
+
+	if cfg.S3BearerAuthEnabled {
+		if cfg.S3BearerTokenURL == "" {
+			return nil, fmt.Errorf("S3_BEARER_TOKEN_URL is required when S3 bearer auth is enabled")
+		}
+		if cfg.S3BearerClientID == "" {
+			return nil, fmt.Errorf("S3_BEARER_CLIENT_ID is required when S3 bearer auth is enabled")
+		}
+		if cfg.S3BearerClientSecret == "" {
+			return nil, fmt.Errorf("S3_BEARER_CLIENT_SECRET is required when S3 bearer auth is enabled")
+		}
+	}
+
+	// OIDC settings
+	oidcEnabled := false
+	if v := os.Getenv("OIDC_ENABLED"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid OIDC_ENABLED: %w", err)
+		}
+		oidcEnabled = b
+	}
+	cfg.OIDCEnabled = oidcEnabled
+	cfg.OIDCIssuerURL = getEnvOrDefault("OIDC_ISSUER_URL", "")
+	cfg.OIDCClientID = getEnvOrDefault("OIDC_CLIENT_ID", "")
+	cfg.OIDCClientSecret = getEnvOrDefault("OIDC_CLIENT_SECRET", "")
+	cfg.OIDCRedirectURL = getEnvOrDefault("OIDC_REDIRECT_URL", "")
+	cfg.SessionSecret = getEnvOrDefault("SESSION_SECRET", "")
+
+	cfg.PlatformEndpoint = getEnvOrDefault("PLATFORM_ENDPOINT", "")
+
+	if v := os.Getenv("TDF_FULFILLABLE_OBLIGATION_FQNS"); v != "" {
+		for _, fqn := range strings.Split(v, ",") {
+			if fqn = strings.TrimSpace(fqn); fqn != "" {
+				cfg.TDFFulfillableObligationFQNs = append(cfg.TDFFulfillableObligationFQNs, fqn)
+			}
+		}
+	}
+
+	if cfg.OIDCEnabled {
+		if cfg.OIDCIssuerURL == "" {
+			return nil, fmt.Errorf("OIDC_ISSUER_URL is required when OIDC is enabled")
+		}
+		if cfg.OIDCClientID == "" {
+			return nil, fmt.Errorf("OIDC_CLIENT_ID is required when OIDC is enabled")
+		}
+		if cfg.OIDCClientSecret == "" {
+			return nil, fmt.Errorf("OIDC_CLIENT_SECRET is required when OIDC is enabled")
+		}
+		if cfg.OIDCRedirectURL == "" {
+			return nil, fmt.Errorf("OIDC_REDIRECT_URL is required when OIDC is enabled")
+		}
+		if cfg.SessionSecret == "" {
+			return nil, fmt.Errorf("SESSION_SECRET is required when OIDC is enabled")
+		}
 	}
 
 	return cfg, nil

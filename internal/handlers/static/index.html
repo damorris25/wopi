@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Virtru WOPI File Manager</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&family=Raleway:wght@600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    /* Virtru Design System tokens */
+    --vds-blue-primary: #3668FF;
+    --vds-blue-darker: #174EB6;
+    --vds-blue-darkest: #001E4A;
+    --vds-blue-lightest: #DEEEFF;
+    --vds-blue-lighter: #B2D6FF;
+    --vds-slate-lightest: #F3F5F7;
+    --vds-slate-even-lighter: #DCE0E5;
+    --vds-slate-lighter: #C6CBD4;
+    --vds-slate-primary: #777E8C;
+    --vds-slate-darker: #515864;
+    --vds-slate-darkest: #2D323B;
+    --vds-green-primary: #75B749;
+    --vds-green-darker: #307A21;
+    --vds-green-lightest: #E8F5E4;
+    --vds-red-primary: #E70D12;
+    --vds-red-darker: #A70A0E;
+    --vds-red-lightest: #FFE9E9;
+    --vds-yellow-primary: #F6B816;
+    --vds-yellow-lightest: #F9F2D8;
+    --vds-white: #FFFFFF;
+    --vds-black: #000000;
+    --vds-radius-xs: 3px;
+    --vds-radius-sm: 6px;
+    --vds-radius-md: 9px;
+    --vds-space-xxs: 3px;
+    --vds-space-xs: 6px;
+    --vds-space-sm: 12px;
+    --vds-space-md: 24px;
+    --vds-space-lg: 48px;
+    --vds-font-body: 'Open Sans', Helvetica, Arial, sans-serif;
+    --vds-font-display: 'Raleway', Helvetica, Arial, sans-serif;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: var(--vds-font-body); height: 100vh; display: flex; flex-direction: column; background: var(--vds-slate-lightest); color: var(--vds-slate-darkest); font-size: 14px; }
+
+  /* ── Navbar ── */
+  #navbar { padding: 0 var(--vds-space-md); background: var(--vds-blue-darkest); display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; height: 56px; }
+  #navbar .nav-brand { display: flex; align-items: center; gap: var(--vds-space-sm); }
+  #navbar .nav-logo svg { display: block; height: 28px; width: auto; }
+  #navbar .nav-title { font-family: var(--vds-font-display); font-size: 16px; font-weight: 600; color: var(--vds-white); letter-spacing: 0.02em; opacity: 0.85; }
+  #navbar .nav-divider { width: 1px; height: 24px; background: rgba(255,255,255,0.2); }
+  #navbar .nav-actions { display: flex; align-items: center; gap: var(--vds-space-sm); }
+  #navbar .nav-user { font-size: 13px; color: rgba(255,255,255,0.7); }
+  #logout-link { color: var(--vds-blue-lighter); text-decoration: none; cursor: pointer; font-size: 13px; font-weight: 600; padding: 6px 12px; border-radius: var(--vds-radius-xs); transition: background 0.15s, color 0.15s; }
+  #logout-link:hover { background: rgba(255,255,255,0.1); color: var(--vds-white); }
+
+  /* ── Toolbar ── */
+  #toolbar { padding: var(--vds-space-sm) var(--vds-space-md); background: var(--vds-white); border-bottom: 1px solid var(--vds-slate-even-lighter); display: flex; align-items: center; gap: var(--vds-space-sm); flex-shrink: 0; }
+  #breadcrumbs { flex: 1; font-size: 14px; color: var(--vds-slate-darker); }
+  #breadcrumbs a { color: var(--vds-blue-primary); text-decoration: none; cursor: pointer; font-weight: 600; }
+  #breadcrumbs a:hover { text-decoration: underline; }
+  #breadcrumbs .sep { margin: 0 6px; color: var(--vds-slate-lighter); }
+
+  /* ── Buttons ── */
+  .btn { padding: 8px 16px; font-size: 13px; font-family: var(--vds-font-body); font-weight: 600; border: 1px solid var(--vds-slate-even-lighter); border-radius: var(--vds-radius-sm); background: var(--vds-white); cursor: pointer; color: var(--vds-slate-darker); transition: all 0.15s; line-height: 1; }
+  .btn:hover { background: var(--vds-slate-lightest); border-color: var(--vds-slate-lighter); }
+  .btn-primary { background: var(--vds-blue-darker); color: var(--vds-white); border-color: var(--vds-blue-darker); }
+  .btn-primary:hover { background: var(--vds-blue-primary); border-color: var(--vds-blue-primary); }
+  .btn-danger { color: var(--vds-red-darker); border-color: var(--vds-red-darker); }
+  .btn-danger:hover { background: var(--vds-red-lightest); }
+
+  /* ── File Browser ── */
+  #browser-view { flex: 1; overflow-y: auto; }
+  #file-table { width: 100%; border-collapse: collapse; background: var(--vds-white); }
+  #file-table thead { position: sticky; top: 0; z-index: 1; }
+  #file-table th { text-align: left; padding: 10px var(--vds-space-md); font-size: 11px; color: var(--vds-slate-primary); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; border-bottom: 2px solid var(--vds-slate-even-lighter); background: var(--vds-white); }
+  #file-table td { padding: 10px var(--vds-space-md); border-bottom: 1px solid var(--vds-slate-lightest); font-size: 14px; }
+  #file-table tbody tr { transition: background 0.1s; }
+  #file-table tbody tr:hover { background: var(--vds-blue-lightest); }
+  .file-icon { margin-right: var(--vds-space-sm); display: inline-flex; vertical-align: middle; flex-shrink: 0; width: 28px; height: 34px; }
+  .file-icon svg { display: block; width: 28px; height: 34px; }
+  .file-link { color: var(--vds-blue-darker); text-decoration: none; cursor: pointer; font-weight: 600; }
+  .file-link:hover { color: var(--vds-blue-primary); text-decoration: underline; }
+  .size-col { width: 100px; color: var(--vds-slate-primary); white-space: nowrap; }
+  .date-col { width: 160px; color: var(--vds-slate-primary); }
+  .actions-col { width: 120px; text-align: right; white-space: nowrap; }
+  .action-btn { background: none; border: 1px solid transparent; cursor: pointer; font-size: 14px; color: var(--vds-slate-primary); padding: 5px 7px; border-radius: var(--vds-radius-xs); transition: all 0.15s; }
+  .action-btn:hover { background: var(--vds-blue-lightest); color: var(--vds-blue-darker); border-color: var(--vds-blue-lighter); }
+  .action-btn.active { color: var(--vds-blue-primary); background: var(--vds-blue-lightest); border-color: var(--vds-blue-lighter); }
+  .action-btn.delete-btn:hover { background: var(--vds-red-lightest); color: var(--vds-red-darker); border-color: #FF8F8E; }
+  .empty-msg { padding: var(--vds-space-lg) var(--vds-space-md); text-align: center; color: var(--vds-slate-primary); font-size: 15px; }
+
+  /* ── Info Detail Row ── */
+  .info-row td { padding: 0 !important; border-bottom: 1px solid var(--vds-slate-even-lighter) !important; }
+  .info-panel { padding: var(--vds-space-sm) var(--vds-space-md) var(--vds-space-sm) 64px; background: var(--vds-slate-lightest); font-size: 13px; color: var(--vds-slate-darker); }
+  .info-panel .info-grid { display: grid; grid-template-columns: 100px 1fr; gap: 4px var(--vds-space-sm); }
+  .info-panel .info-label { color: var(--vds-slate-primary); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: 0.04em; padding-top: 2px; }
+  .info-panel .info-value { color: var(--vds-slate-darkest); word-break: break-all; }
+  .info-panel .attr-tag { display: inline-block; background: var(--vds-blue-lightest); color: var(--vds-blue-darker); padding: 2px 10px; border-radius: var(--vds-radius-xs); font-size: 12px; margin: 2px 4px 2px 0; word-break: break-all; font-weight: 600; }
+
+  /* ── Editor View ── */
+  #editor-view { display: none; flex: 1; flex-direction: column; }
+  #editor-toolbar { padding: var(--vds-space-sm) var(--vds-space-md); background: var(--vds-white); border-bottom: 1px solid var(--vds-slate-even-lighter); display: flex; align-items: center; gap: var(--vds-space-sm); flex-shrink: 0; }
+  #editor-toolbar .back-link { color: var(--vds-blue-primary); text-decoration: none; cursor: pointer; font-size: 14px; font-weight: 600; }
+  #editor-toolbar .back-link:hover { text-decoration: underline; }
+  #editor-toolbar .file-name { font-size: 14px; color: var(--vds-slate-darkest); font-weight: 600; }
+  #editor-frame { flex: 1; }
+  #editor-frame iframe { width: 100%; height: 100%; border: none; }
+
+  /* ── Error banner ── */
+  #error-msg { display: none; padding: var(--vds-space-sm) var(--vds-space-md); background: var(--vds-red-lightest); color: var(--vds-red-darker); border-bottom: 1px solid #FF8F8E; font-size: 14px; flex-shrink: 0; font-weight: 600; }
+
+  /* ── Upload Modal ── */
+  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(45,50,59,0.5); z-index: 100; align-items: center; justify-content: center; }
+  .modal-overlay.active { display: flex; }
+  .modal { background: var(--vds-white); border-radius: var(--vds-radius-md); padding: var(--vds-space-md); width: 440px; max-width: 90%; max-height: 80vh; overflow-y: auto; box-shadow: 0 12px 40px rgba(0,30,74,0.2); }
+  .modal h2 { font-family: var(--vds-font-display); font-size: 20px; font-weight: 700; margin-bottom: var(--vds-space-sm); color: var(--vds-slate-darkest); }
+  .modal label { display: block; font-size: 13px; color: var(--vds-slate-darker); margin-bottom: 4px; font-weight: 600; }
+  .modal input[type=file] { display: block; margin-bottom: var(--vds-space-sm); font-family: var(--vds-font-body); font-size: 13px; }
+  .attr-list { margin-bottom: var(--vds-space-sm); max-height: 200px; overflow-y: auto; border: 1px solid var(--vds-slate-even-lighter); border-radius: var(--vds-radius-sm); padding: var(--vds-space-xs); }
+  .attr-list label { display: flex; align-items: center; gap: 8px; padding: 4px var(--vds-space-xs); font-size: 13px; cursor: pointer; border-radius: var(--vds-radius-xs); }
+  .attr-list label:hover { background: var(--vds-slate-lightest); }
+  .attr-list input[type=checkbox] { flex-shrink: 0; accent-color: var(--vds-blue-primary); }
+  .attr-fqn { word-break: break-all; color: var(--vds-slate-darkest); }
+  .attr-none { font-size: 13px; color: var(--vds-slate-primary); font-style: italic; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: var(--vds-space-xs); margin-top: var(--vds-space-sm); }
+
+  /* ── Confirm inline ── */
+  .confirm-row { display: flex; align-items: center; gap: var(--vds-space-xs); }
+  .confirm-row .confirm-text { font-size: 12px; color: var(--vds-red-darker); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<nav id="navbar">
+  <div class="nav-brand">
+    <span class="nav-logo">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 407 149" fill="none">
+        <g fill="#FFFFFF">
+          <path d="M236.3,100.7c-3.6,0-6.5-2.9-6.5-6.5v-37c0-3.6,2.9-6.5,6.5-6.5s6.5,2.9,6.5,6.5v37C242.8,97.8,239.9,100.7,236.3,100.7z"/>
+          <path d="M262.6,100.7c-3.6,0-6.5-2.9-6.5-6.5V54.4l3.9-1.7c1.3-0.6,12.9-5.3,23.1-1.5c3.3,1.3,5,5,3.8,8.3c-1.3,3.3-5,5-8.3,3.8c-2.8-1.1-6.6-0.7-9.5,0v30.9C269,97.8,266.1,100.7,262.6,100.7z"/>
+          <path d="M314.7,50.8h-6.9v-4c0-3.6-2.9-6.5-6.5-6.5s-6.5,2.9-6.5,6.5v47.5c0,3.6,2.9,6.5,6.5,6.5s6.5-2.9,6.5-6.5V63.7h6.9c3.6,0,6.5-2.9,6.5-6.5C321.2,53.7,318.3,50.8,314.7,50.8z"/>
+          <circle cx="236.5" cy="37.5" r="6.5"/>
+          <path d="M335.6,100.7L335.6,100.7c-3.6,0-6.5-2.9-6.5-6.5l0-39.9l4.1-1.6c1.3-0.5,12.8-4.8,22.9-1c3.3,1.3,5,5,3.8,8.3c-1.3,3.3-5,5-8.3,3.8c-2.9-1.1-6.6-0.8-9.5-0.2l0,30.6C342.1,97.8,339.2,100.7,335.6,100.7z"/>
+          <path d="M387.4,100.7c-10.7,0-19.4-8.7-19.4-19.4v-24c0-3.6,2.9-6.5,6.5-6.5s6.5,2.9,6.5,6.5v24c0,3.6,2.9,6.5,6.5,6.5c3.6,0,6.5-2.9,6.5-6.5v-24c0-3.6,2.9-6.5,6.5-6.5s6.5,2.9,6.5,6.5v24C406.9,92,398.2,100.7,387.4,100.7z"/>
+          <path d="M176.8,101.8V52.6h12.9v31.4v0.4c7.4-3.8,17.3-11.7,17.3-27.2c0-3.6,2.9-6.5,6.5-6.5s6.5,2.9,6.5,6.5c0,27.8-23.2,39.8-35.4,42.9C184.6,100.2,179.6,101.5,176.8,101.8z"/>
+        </g>
+        <path fill="#FFFFFF" d="M57.3,52.6L57.3,52.6l0,49.2c2.8-0.4,7.8-1.6,7.8-1.6c12.2-3.2,35.4-15.1,35.4-42.9c0-3.6-2.9-6.5-6.5-6.5c-3.6,0-6.5,2.9-6.5,6.5c0,15.5-9.9,23.5-17.3,27.2v-0.4V52.6h0H57.3z"/>
+        <path fill="#FFFFFF" d="M137.3,35.3c-0.2,2.7-1.5,5.2-3.8,6.9c-2.6,1.9-5.8,2.2-8.5,1.3c-0.1-0.2-0.2-0.4-0.4-0.6c6.4,10.3,9.8,22.7,8.8,35.8c-2.5,32.7-31,57.3-63.7,54.8c-32.7-2.5-57.3-31-54.8-63.7c2.5-32.7,31-57.3,63.7-54.8c7.3,0.6,14.2,2.4,20.5,5.3c-0.2-0.1-0.4-0.2-0.6-0.3c2.6,1.2,5.8,0.9,8.1-1.2c3.1-2.7,3.3-7.4,0.6-10.5c-0.5-0.6-1.2-1.1-1.8-1.5c-7.9-3.7-16.5-6-25.7-6.7C38.9-2.9,3.3,27.8,0.2,68.6c-3.1,40.9,27.6,76.5,68.4,79.5c40.9,3.1,76.5-27.6,79.5-68.4C149.4,63.5,145.3,48.1,137.3,35.3z"/>
+        <path fill="#FFFFFF" opacity="0.5" d="M136.7,34.4c-0.2-0.4-0.5-0.8-0.7-1.2c-0.2-0.3-0.4-0.5-0.5-0.8c-0.3-0.5-0.7-1-1-1.5c-1-1.4-2.1-2.8-3.2-4.1c0,0,0,0,0,0c-0.2-0.3-0.4-0.5-0.7-0.8c-0.1-0.1-0.2-0.2-0.2-0.3c-0.1-0.1-0.2-0.3-0.4-0.4c-0.4-0.4-0.7-0.8-1.1-1.2c-0.3-0.4-0.7-0.7-1-1.1c-0.3-0.3-0.5-0.5-0.8-0.8c-0.6-0.6-1.2-1.2-1.7-1.7c-0.1-0.1-0.1-0.1-0.2-0.2c-3.3-3.2-7-6.1-10.9-8.6c0,0,0,0,0.1,0.1c-1.5-1-3-1.9-4.6-2.7c-0.3-0.2-0.7-0.4-1-0.5c-0.1,0-0.2-0.1-0.2-0.1c-1-0.5-2.1-1.1-3.2-1.6c0.7,0.4,1.3,0.9,1.8,1.5c2.7,3.1,2.4,7.7-0.6,10.5c-2.3,2-5.5,2.4-8.1,1.2c0.2,0.1,0.4,0.2,0.6,0.3c0.3,0.1,0.5,0.3,0.8,0.4c0.7,0.3,1.4,0.7,2,1c4,2.1,7.7,4.6,11,7.5c0.6,0.6,1.3,1.1,1.9,1.7c0,0,0.1,0.1,0.1,0.1c0.5,0.5,1,1,1.5,1.4c0.2,0.2,0.4,0.4,0.6,0.6c0.3,0.3,0.5,0.6,0.8,0.9c0.3,0.4,0.6,0.7,1,1.1c0,0,0,0,0,0c1.6,1.8,3.1,3.7,4.4,5.7c0.2,0.2,0.3,0.5,0.5,0.7c0.3,0.4,0.6,0.9,0.8,1.3c0.1,0.2,0.2,0.4,0.4,0.6c2.8,1,6,0.6,8.5-1.3c2.3-1.7,3.6-4.3,3.8-6.9C137.1,35,136.9,34.7,136.7,34.4z"/>
+      </svg>
+    </span>
+    <span class="nav-divider"></span>
+    <span class="nav-title">File Manager</span>
+  </div>
+  <div class="nav-actions">
+    <span class="nav-user" id="user-info"></span>
+    <a id="logout-link" href="/auth/logout">Log out</a>
+  </div>
+</nav>
+
+<div id="error-msg"></div>
+
+<!-- ── File Browser View ── -->
+<div id="browser-view">
+  <div id="toolbar">
+    <div id="breadcrumbs"></div>
+    <button class="btn btn-primary" onclick="showUploadModal()">Upload</button>
+    <button class="btn" onclick="refreshListing()">Refresh</button>
+  </div>
+  <table id="file-table">
+    <thead>
+      <tr><th>Name</th><th class="size-col">Size</th><th class="date-col">Modified</th><th class="actions-col"></th></tr>
+    </thead>
+    <tbody id="file-body"></tbody>
+  </table>
+</div>
+
+<!-- ── Editor View ── -->
+<div id="editor-view">
+  <div id="editor-toolbar">
+    <a class="back-link" onclick="closeEditor()">&#8592; Back to Files</a>
+    <span class="file-name" id="editor-file-name"></span>
+  </div>
+  <div id="editor-frame"></div>
+</div>
+
+<!-- ── Upload Modal ── -->
+<div class="modal-overlay" id="upload-modal">
+  <div class="modal">
+    <h2>Upload File</h2>
+    <label for="upload-file">File</label>
+    <input type="file" id="upload-file">
+    <label>Data Attributes</label>
+    <div class="attr-list" id="attr-list">
+      <span class="attr-none">Loading...</span>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="hideUploadModal()">Cancel</button>
+      <button class="btn btn-primary" id="upload-submit" onclick="submitUpload()">Upload</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  var currentPrefix = '';
+  var deleteConfirmId = null;
+  var openInfoId = null;
+
+  var errorMsg = document.getElementById('error-msg');
+  var fileBody = document.getElementById('file-body');
+  var breadcrumbs = document.getElementById('breadcrumbs');
+  var browserView = document.getElementById('browser-view');
+  var editorView = document.getElementById('editor-view');
+  var editorFrame = document.getElementById('editor-frame');
+  var editorFileName = document.getElementById('editor-file-name');
+
+  function showError(msg) {
+    errorMsg.textContent = msg;
+    errorMsg.style.display = 'block';
+    setTimeout(function() { errorMsg.style.display = 'none'; }, 5000);
+  }
+
+  function formatSize(bytes) {
+    if (bytes == null || bytes === 0) return '\u2014';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / 1048576).toFixed(1) + ' MB';
+  }
+
+  function formatDate(isoStr) {
+    if (!isoStr) return '\u2014';
+    var d = new Date(isoStr);
+    var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return months[d.getMonth()] + ' ' + d.getDate() + ', ' + d.getFullYear();
+  }
+
+  function escapeHtml(str) {
+    var div = document.createElement('div');
+    div.appendChild(document.createTextNode(str));
+    return div.innerHTML;
+  }
+
+  // Strip .tdf wrapper extension for display (s4proxy decrypts transparently)
+  function displayName(filename) {
+    return (filename || '').replace(/\.tdf$/i, '');
+  }
+
+  // ── File type icons ──
+  function fileIcon(filename) {
+    var name = (filename || '').replace(/\.tdf$/i, '');
+    var ext = name.split('.').pop().toLowerCase();
+    var colors = {
+      doc: '#174EB6', docx: '#174EB6', odt: '#174EB6', rtf: '#174EB6',
+      xls: '#307A21', xlsx: '#307A21', ods: '#307A21', csv: '#307A21',
+      ppt: '#D24726', pptx: '#D24726', odp: '#D24726',
+      pdf: '#A70A0E',
+      txt: '#777E8C', md: '#777E8C', log: '#777E8C',
+      json: '#F6B816', xml: '#F6B816', yaml: '#F6B816', yml: '#F6B816',
+      js: '#F6B816', ts: '#174EB6', py: '#3668FF', go: '#00ADD8',
+      html: '#E34F26', css: '#174EB6',
+      png: '#6E5BCF', jpg: '#6E5BCF', jpeg: '#6E5BCF', gif: '#6E5BCF',
+      svg: '#6E5BCF', webp: '#6E5BCF', bmp: '#6E5BCF', ico: '#6E5BCF',
+      zip: '#515864', gz: '#515864', tar: '#515864', rar: '#515864', '7z': '#515864',
+      mp4: '#EC4899', mov: '#EC4899', avi: '#EC4899', mkv: '#EC4899', webm: '#EC4899',
+      mp3: '#06B6D4', wav: '#06B6D4', ogg: '#06B6D4', flac: '#06B6D4'
+    };
+    var labels = {
+      doc: 'DOC', docx: 'DOC', odt: 'DOC', rtf: 'RTF',
+      xls: 'XLS', xlsx: 'XLS', ods: 'ODS', csv: 'CSV',
+      ppt: 'PPT', pptx: 'PPT', odp: 'ODP',
+      pdf: 'PDF',
+      txt: 'TXT', md: 'MD', log: 'LOG',
+      json: 'JSON', xml: 'XML', yaml: 'YML', yml: 'YML',
+      js: 'JS', ts: 'TS', py: 'PY', go: 'GO',
+      html: 'HTML', css: 'CSS',
+      png: 'PNG', jpg: 'JPG', jpeg: 'JPG', gif: 'GIF',
+      svg: 'SVG', webp: 'WEBP', bmp: 'BMP', ico: 'ICO',
+      zip: 'ZIP', gz: 'GZ', tar: 'TAR', rar: 'RAR', '7z': '7Z',
+      mp4: 'MP4', mov: 'MOV', avi: 'AVI', mkv: 'MKV', webm: 'WEBM',
+      mp3: 'MP3', wav: 'WAV', ogg: 'OGG', flac: 'FLAC'
+    };
+    var color = colors[ext] || '#777E8C';
+    var label = labels[ext] || ext.toUpperCase().substring(0, 4) || 'FILE';
+    var fontSize = label.length <= 3 ? '8' : (label.length === 4 ? '6.5' : '6');
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 34">' +
+      '<path d="M2 1h16l8 8v23a2 2 0 01-2 2H4a2 2 0 01-2-2V3a2 2 0 012-2z" fill="#fff" stroke="#C6CBD4" stroke-width="1"/>' +
+      '<path d="M18 1l8 8h-6a2 2 0 01-2-2V1z" fill="#F3F5F7" stroke="#C6CBD4" stroke-width="1"/>' +
+      '<rect x="1" y="20" width="26" height="13" rx="2" fill="' + color + '"/>' +
+      '<text x="14" y="29.5" text-anchor="middle" fill="#fff" font-family="\'Open Sans\',Arial,sans-serif" font-size="' + fontSize + '" font-weight="700">' + label + '</text>' +
+      '</svg>';
+  }
+
+  function folderIcon() {
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 34">' +
+      '<path d="M1 8h10l3-4h12a2 2 0 012 2v24a2 2 0 01-2 2H3a2 2 0 01-2-2V8z" fill="#B2D6FF" stroke="#3668FF" stroke-width="0.75"/>' +
+      '<path d="M1 12h26v18a2 2 0 01-2 2H3a2 2 0 01-2-2V12z" fill="#DEEEFF" stroke="#3668FF" stroke-width="0.75"/>' +
+      '</svg>';
+  }
+
+  // ── Breadcrumbs ──
+  function renderBreadcrumbs() {
+    var html = '<a onclick="navigateToFolder(\'\')">Home</a>';
+    if (currentPrefix) {
+      var parts = currentPrefix.replace(/\/$/, '').split('/');
+      var accum = '';
+      for (var i = 0; i < parts.length; i++) {
+        accum += parts[i] + '/';
+        html += '<span class="sep">&rsaquo;</span>';
+        if (i === parts.length - 1) {
+          html += '<span>' + escapeHtml(parts[i]) + '</span>';
+        } else {
+          html += '<a onclick="navigateToFolder(\'' + escapeHtml(accum) + '\')">' + escapeHtml(parts[i]) + '</a>';
+        }
+      }
+    }
+    breadcrumbs.innerHTML = html;
+  }
+
+  // ── Navigation ──
+  window.navigateToFolder = function(prefix) {
+    currentPrefix = prefix;
+    loadListing();
+  };
+
+  // ── Load file listing ──
+  function loadListing() {
+    renderBreadcrumbs();
+    deleteConfirmId = null;
+    openInfoId = null;
+
+    var url = '/api/files/browse';
+    if (currentPrefix) url += '?prefix=' + encodeURIComponent(currentPrefix);
+
+    fetch(url)
+      .then(function(r) {
+        if (r.status === 401) { window.location.href = '/'; return; }
+        if (!r.ok) throw new Error('Failed to load files');
+        return r.json();
+      })
+      .then(function(listing) {
+        if (!listing) return;
+        fileBody.innerHTML = '';
+
+        if (listing.folders.length === 0 && listing.files.length === 0) {
+          fileBody.innerHTML = '<tr><td colspan="4" class="empty-msg">This folder is empty</td></tr>';
+          return;
+        }
+
+        // Folders first
+        listing.folders.forEach(function(f) {
+          var tr = document.createElement('tr');
+          tr.innerHTML =
+            '<td><span class="file-icon">' + folderIcon() + '</span><a class="file-link" onclick="navigateToFolder(\'' + escapeHtml(f.prefix) + '\')">' + escapeHtml(f.name) + '/</a></td>' +
+            '<td class="size-col">\u2014</td>' +
+            '<td class="date-col">\u2014</td>' +
+            '<td class="actions-col"></td>';
+          fileBody.appendChild(tr);
+        });
+
+        // Files
+        listing.files.forEach(function(f) {
+          var fid = escapeHtml(f.file_id);
+          var fname = escapeHtml(displayName(f.name));
+          var tr = document.createElement('tr');
+          tr.setAttribute('data-file-id', f.file_id);
+          tr.innerHTML =
+            '<td><span class="file-icon">' + fileIcon(f.name) + '</span><a class="file-link" onclick="openFile(\'' + fid + '\', \'' + fname + '\')">' + fname + '</a></td>' +
+            '<td class="size-col">' + formatSize(f.size) + '</td>' +
+            '<td class="date-col">' + formatDate(f.last_modified) + '</td>' +
+            '<td class="actions-col">' +
+              '<button class="action-btn" title="Info" onclick="toggleInfo(\'' + fid + '\', this)">&#9432;</button>' +
+              '<button class="action-btn" title="Download" onclick="downloadFile(\'' + fid + '\')">&#11015;</button>' +
+              '<button class="action-btn delete-btn" title="Delete" onclick="confirmDelete(\'' + fid + '\', this)">&#128465;</button>' +
+            '</td>';
+          fileBody.appendChild(tr);
+        });
+      })
+      .catch(function(err) { showError(err.message); });
+  }
+
+  window.refreshListing = function() { loadListing(); };
+
+  // ── Download file ──
+  window.downloadFile = function(fileId) {
+    window.location.href = '/api/files/download?file_id=' + encodeURIComponent(fileId);
+  };
+
+  // ── Toggle info panel ──
+  window.toggleInfo = function(fileId, btn) {
+    // If already open for this file, close it
+    var existingRow = document.getElementById('info-row-' + fileId);
+    if (existingRow) {
+      existingRow.remove();
+      openInfoId = null;
+      btn.classList.remove('active');
+      return;
+    }
+
+    // Close any other open info panel
+    var prev = document.querySelector('.info-row');
+    if (prev) prev.remove();
+    var prevBtn = document.querySelector('.action-btn.active');
+    if (prevBtn) prevBtn.classList.remove('active');
+
+    openInfoId = fileId;
+    btn.classList.add('active');
+
+    // Find the file row and insert info row after it
+    var fileRow = btn.closest('tr');
+    var infoTr = document.createElement('tr');
+    infoTr.id = 'info-row-' + fileId;
+    infoTr.className = 'info-row';
+    infoTr.innerHTML = '<td colspan="4"><div class="info-panel"><span style="color:var(--vds-slate-primary)">Loading...</span></div></td>';
+    fileRow.after(infoTr);
+
+    // Fetch file info
+    fetch('/api/files/info?file_id=' + encodeURIComponent(fileId))
+      .then(function(r) {
+        if (r.status === 401) { window.location.href = '/'; return; }
+        if (!r.ok) throw new Error('Failed to load file info');
+        return r.json();
+      })
+      .then(function(info) {
+        if (!info) return;
+        var panel = infoTr.querySelector('.info-panel');
+        var attrsHtml = '';
+        if (info.attributes && info.attributes.length > 0) {
+          info.attributes.forEach(function(a) {
+            attrsHtml += '<span class="attr-tag">' + escapeHtml(a) + '</span>';
+          });
+        } else {
+          attrsHtml = '<span style="color:var(--vds-slate-primary);font-style:italic">None</span>';
+        }
+        panel.innerHTML =
+          '<div class="info-grid">' +
+            '<span class="info-label">Name</span><span class="info-value">' + escapeHtml(displayName(info.name)) + '</span>' +
+            '<span class="info-label">Size</span><span class="info-value">' + formatSize(info.size) + '</span>' +
+            '<span class="info-label">Modified</span><span class="info-value">' + formatDate(info.last_modified) + '</span>' +
+            '<span class="info-label">Type</span><span class="info-value">' + escapeHtml(info.content_type || '\u2014') + '</span>' +
+            '<span class="info-label">Version</span><span class="info-value">' + escapeHtml(info.version || '\u2014') + '</span>' +
+            '<span class="info-label">Attributes</span><span class="info-value">' + attrsHtml + '</span>' +
+          '</div>';
+      })
+      .catch(function(err) {
+        var panel = infoTr.querySelector('.info-panel');
+        if (panel) panel.innerHTML = '<span style="color:var(--vds-red-darker)">Failed to load info</span>';
+      });
+  };
+
+  // ── Open file in editor ──
+  window.openFile = function(fileId, name) {
+    browserView.style.display = 'none';
+    editorView.style.display = 'flex';
+    editorFileName.textContent = name;
+    editorFrame.innerHTML = '';
+
+    fetch('/api/editor?file_id=' + encodeURIComponent(fileId))
+      .then(function(r) {
+        if (r.status === 401) { window.location.href = '/'; return; }
+        if (!r.ok) throw new Error('Failed to get editor URL');
+        return r.json();
+      })
+      .then(function(data) {
+        if (!data) return;
+        var iframe = document.createElement('iframe');
+        iframe.src = data.editor_url;
+        iframe.setAttribute('allowfullscreen', 'true');
+        iframe.setAttribute('allow', 'clipboard-read; clipboard-write');
+        editorFrame.appendChild(iframe);
+      })
+      .catch(function(err) {
+        showError(err.message);
+        closeEditor();
+      });
+  };
+
+  window.closeEditor = function() {
+    editorView.style.display = 'none';
+    browserView.style.display = '';
+    editorFrame.innerHTML = '';
+    loadListing();
+  };
+
+  // ── Delete with inline confirm ──
+  window.confirmDelete = function(fileId, btn) {
+    // If already confirming this file, execute delete
+    if (deleteConfirmId === fileId) {
+      executeDelete(fileId);
+      return;
+    }
+
+    // Reset any previous confirm
+    resetDeleteConfirm();
+    deleteConfirmId = fileId;
+
+    var td = btn.parentElement;
+    td.innerHTML = '<div class="confirm-row"><span class="confirm-text">Sure?</span><button class="btn btn-danger" style="padding:2px 8px;font-size:12px" onclick="executeDelete(\'' + escapeHtml(fileId) + '\')">Delete</button><button class="btn" style="padding:2px 8px;font-size:12px" onclick="resetDeleteConfirm(); refreshListing();">No</button></div>';
+  };
+
+  window.executeDelete = function(fileId) {
+    fetch('/api/files?file_id=' + encodeURIComponent(fileId), { method: 'DELETE' })
+      .then(function(r) {
+        if (r.status === 401) { window.location.href = '/'; return; }
+        if (!r.ok) throw new Error('Failed to delete file');
+        loadListing();
+      })
+      .catch(function(err) { showError(err.message); });
+  };
+
+  window.resetDeleteConfirm = function() {
+    deleteConfirmId = null;
+  };
+
+  // ── Upload Modal ──
+  window.showUploadModal = function() {
+    document.getElementById('upload-modal').classList.add('active');
+    document.getElementById('upload-file').value = '';
+    loadAttributes();
+  };
+
+  window.hideUploadModal = function() {
+    document.getElementById('upload-modal').classList.remove('active');
+  };
+
+  function loadAttributes() {
+    var attrListEl = document.getElementById('attr-list');
+    attrListEl.innerHTML = '<span class="attr-none">Loading...</span>';
+
+    fetch('/api/attributes')
+      .then(function(r) {
+        if (!r.ok) throw new Error('Failed to load attributes');
+        return r.json();
+      })
+      .then(function(data) {
+        var attrs = data.attributes || [];
+        if (attrs.length === 0) {
+          attrListEl.innerHTML = '<span class="attr-none">No data attributes available</span>';
+          return;
+        }
+        attrListEl.innerHTML = '';
+        attrs.forEach(function(fqn, i) {
+          var label = document.createElement('label');
+          var cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.value = fqn;
+          cb.name = 'attr';
+          var span = document.createElement('span');
+          span.className = 'attr-fqn';
+          span.textContent = fqn;
+          label.appendChild(cb);
+          label.appendChild(span);
+          attrListEl.appendChild(label);
+        });
+      })
+      .catch(function() {
+        attrListEl.innerHTML = '<span class="attr-none">Could not load attributes</span>';
+      });
+  }
+
+  window.submitUpload = function() {
+    var fileInput = document.getElementById('upload-file');
+    if (!fileInput.files || !fileInput.files[0]) {
+      showError('Please select a file');
+      return;
+    }
+
+    var selectedAttrs = [];
+    var checkboxes = document.querySelectorAll('#attr-list input[type=checkbox]:checked');
+    checkboxes.forEach(function(cb) { selectedAttrs.push(cb.value); });
+
+    var formData = new FormData();
+    formData.append('file', fileInput.files[0]);
+    formData.append('prefix', currentPrefix);
+    if (selectedAttrs.length > 0) {
+      formData.append('attributes', JSON.stringify(selectedAttrs));
+    }
+
+    var submitBtn = document.getElementById('upload-submit');
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Uploading...';
+
+    fetch('/api/files/upload', { method: 'POST', body: formData })
+      .then(function(r) {
+        if (r.status === 401) { window.location.href = '/'; return; }
+        if (!r.ok) throw new Error('Upload failed');
+        return r.json();
+      })
+      .then(function() {
+        hideUploadModal();
+        loadListing();
+      })
+      .catch(function(err) { showError(err.message); })
+      .finally(function() {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Upload';
+      });
+  };
+
+  // ── Init ──
+  loadListing();
+})();
+</script>
+</body>
+</html>

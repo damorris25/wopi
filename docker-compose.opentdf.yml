@@ -1,0 +1,1116 @@
+################################################################################
+# OpenTDF + WOPI Server + Collabora + Secure Object Proxy
+#
+# Usage:
+#   docker compose -f docker-compose.opentdf.yml up --build
+#
+# Prerequisites — add to /etc/hosts:
+#   127.0.0.1 platform.opentdf.local keycloak.opentdf.local wopi.opentdf.local collabora.opentdf.local s4proxy.opentdf.local
+################################################################################
+
+networks:
+  default:
+    name: opentdf_platform
+
+configs:
+  caddy_config:
+    content: |
+      {
+        log {
+            level INFO
+            output stdout
+        }
+      }
+      https://keycloak.opentdf.local:9443 {
+        tls internal
+        reverse_proxy keycloak:8888
+      }
+      https://platform.opentdf.local:8443 {
+        tls internal
+        reverse_proxy {
+            to h2c://platform:8080
+            transport http {
+                versions h2c 2 1.1
+            }
+        }
+      }
+      https://wopi.opentdf.local:8443 {
+        tls internal
+        # Collabora paths — proxy to Collabora container
+        handle /browser/* {
+          reverse_proxy collabora:9980
+        }
+        handle /cool/* {
+          reverse_proxy collabora:9980
+        }
+        handle /hosting/* {
+          reverse_proxy collabora:9980
+        }
+        # Everything else — proxy to wopi-server
+        handle {
+          reverse_proxy wopi-server:8080
+        }
+      }
+      https://s4proxy.opentdf.local:8443 {
+        tls internal
+        reverse_proxy secure-object-proxy:8080
+      }
+  s4proxy_config:
+    content: |
+      logging:
+        level: debug
+      server:
+        port: 8080
+        cors:
+          allow_credentials: true
+          allowed_origins: ["https://wopi.opentdf.local:8443"]
+          expose_headers: "etag"
+      auth:
+        issuer: https://keycloak.opentdf.local:9443/auth/realms/opentdf
+        insecureSkipVerify: true
+        sts:
+          enabled: true
+          clientId: opentdf-sdk
+          clientSecret: secret
+        bearer:
+          enabled: true
+      backend:
+        clientId: opentdf-sdk
+        clientSecret: secret
+        platformUrl: https://platform.opentdf.local:8443
+        oidcUrl: https://keycloak.opentdf.local:9443/auth/realms/opentdf/protocol/openid-connect/token
+        defaultAttrs: ["https://example.com/attr/attr1/value/value1"]
+        insecure: true
+        skipTLSConnVerify: true
+        provider:
+          minio:
+            type: s3
+            endpoint: http://host.docker.internal:9000
+            region: us-east-1
+            s3VendorType: minio
+            usePathStyle: true
+            insecureSkipVerify: true
+            credentials:
+              type: static
+              config:
+                accessKey: minioadmin
+                secretKey: rMxfdNJUzsx*Wor7
+        default: minio
+
+services:
+
+  ############################################################################
+  # Caddy — TLS-terminating reverse proxy
+  ############################################################################
+  caddy:
+    image: caddy:2.8.4-alpine
+    command: ['caddy','run', '--config', '/etc/caddy/Caddyfile']
+    configs:
+      - source: caddy_config
+        target: /etc/caddy/Caddyfile
+    ports:
+      - "8443:8443"
+      - "9443:9443"
+      - "2019:2019"
+    volumes:
+      - caddy_data:/data
+    depends_on:
+      ensure-permissions:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:2019/metrics"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  check-certs:
+    image: alpine:3.23
+    volumes:
+      - caddy_data:/caddy-data:ro
+    command:
+      - sh
+      - -c
+      - |
+        echo "Checking Caddy root CA"
+        if [ -f /caddy-data/caddy/pki/authorities/local/root.crt ]; then
+          echo "Root CA present"; openssl x509 -in /caddy-data/caddy/pki/authorities/local/root.crt -noout -subject -issuer
+        else
+          echo "Root CA NOT found"
+        fi
+    depends_on:
+      prepare-ca-certs:
+        condition: service_completed_successfully
+    restart: "no"
+
+  ensure-permissions:
+    image: alpine:3.23
+    command:
+    - 'sh'
+    - '-c'
+    - |
+      chmod -R 755 /data
+    volumes:
+      - caddy_data:/data
+    restart: "no"
+
+  ############################################################################
+  # Keycloak + PostgreSQL
+  ############################################################################
+  keycloak:
+    volumes:
+    - keys:/keys:ro
+    image: keycloak/keycloak:25.0
+    restart: always
+    depends_on:
+      fix-keys-permissions:
+        condition: service_completed_successfully
+    command:
+    - "start-dev"
+    - "--verbose"
+    - "-Djavax.net.ssl.trustStorePassword=password"
+    - "-Djavax.net.ssl.HostnameVerifier=AllowAll"
+    - "-Djavax.net.ssl.trustStore=/keys/ca.jks"
+    - "--spi-truststore-file-hostname-verification-policy=ANY"
+    environment:
+      KC_PROXY: edge
+      KC_HTTP_RELATIVE_PATH: /auth
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_BACKCHANNEL: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
+      KC_HTTP_ENABLED: "true"
+      KC_HTTP_PORT: "8888"
+      KC_HTTPS_PORT: "8443"
+      KC_HTTP_MANAGEMENT_PORT: "9001"
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: changeme
+      KC_FEATURES: "preview,token-exchange"
+      KC_HEALTH_ENABLED: "true"
+      KC_HTTPS_KEY_STORE_PASSWORD: "password"
+      KC_HTTPS_KEY_STORE_FILE: "/keys/ca.jks"
+      KC_HTTPS_CERTIFICATE_FILE: "/keys/localhost.crt"
+      KC_HTTPS_CERTIFICATE_KEY_FILE: "/keys/localhost.key"
+      KC_HTTPS_CLIENT_AUTH: "request"
+      JAVA_OPTS_APPEND: "${JAVA_OPTS_APPEND:-}"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - |
+          [ -f /tmp/HealthCheck.java ] || echo "public class HealthCheck {
+            public static void main(String[] args) throws java.lang.Throwable {
+              javax.net.ssl.HttpsURLConnection.setDefaultHostnameVerifier((hostname, session) -> true);
+              javax.net.ssl.SSLContext sc = javax.net.ssl.SSLContext.getInstance(\"SSL\");
+              sc.init(null, new javax.net.ssl.TrustManager[]{
+                new javax.net.ssl.X509TrustManager() {
+                  public java.security.cert.X509Certificate[] getAcceptedIssuers() { return null; }
+                  public void checkClientTrusted(java.security.cert.X509Certificate[] certs, String authType) {}
+                  public void checkServerTrusted(java.security.cert.X509Certificate[] certs, String authType) {}
+                }
+              }, new java.security.SecureRandom());
+              javax.net.ssl.HttpsURLConnection.setDefaultSSLSocketFactory(sc.getSocketFactory());
+              java.net.HttpURLConnection conn = (java.net.HttpURLConnection)new java.net.URL(args[0]).openConnection();
+              System.exit(java.net.HttpURLConnection.HTTP_OK == conn.getResponseCode() ? 0 : 1);
+            }
+          }" > /tmp/HealthCheck.java && java ${JAVA_OPTS_APPEND} /tmp/HealthCheck.java http://localhost:8888/auth 2>/dev/null
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 3m
+
+  opentdfdb:
+    image: postgres:15-alpine
+    restart: always
+    user: postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: opentdf
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+      - "4318:4318"
+      - "14250:14250"
+    profiles:
+      - tracing
+    restart: always
+
+  ############################################################################
+  # Provisioning & key generation (init containers)
+  ############################################################################
+  init-volumes:
+    image: alpine:3.23
+    volumes:
+      - configs:/configs
+      - keys:/keys
+    command:
+      - sh
+      - -c
+      - |
+        chmod 777 /configs /keys
+        mkdir -p /configs/service/internal/fixtures
+        chmod -R 777 /configs
+    restart: "no"
+
+  fix-keys-permissions:
+    image: alpine:3.23
+    volumes:
+      - keys:/keys
+    depends_on:
+      generate-keys:
+        condition: service_completed_successfully
+    command:
+      - sh
+      - -c
+      - |
+        chmod -R 755 /keys
+        chmod 644 /keys/*
+    restart: "no"
+
+  download-platform-config:
+    image: alpine:3.23
+    volumes:
+      - configs:/configs
+    depends_on:
+      init-volumes:
+        condition: service_completed_successfully
+    command: ['wget', '-O', '/configs/opentdf.yaml', 'https://raw.githubusercontent.com/opentdf/platform/main/opentdf-example.yaml']
+    restart: "no"
+
+  patch-platform-config:
+    image: alpine:3.23
+    volumes:
+      - configs:/configs
+    depends_on:
+      download-platform-config:
+        condition: service_completed_successfully
+    command:
+      - sh
+      - -c
+      - |
+        apk add --no-cache sed
+        sed -i 's|http://keycloak:8888|https://keycloak.opentdf.local:9443|g' /configs/opentdf.yaml
+        echo "Patched opentdf.yaml to use keycloak.opentdf.local:9443"
+    restart: "no"
+
+  download-keycloak-data:
+    image: alpine:3.23
+    volumes:
+      - configs:/configs
+    depends_on:
+      init-volumes:
+        condition: service_completed_successfully
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        URL='https://raw.githubusercontent.com/opentdf/platform/main/service/cmd/keycloak_data.yaml'
+        OUTPUT='/configs/keycloak_data.yaml'
+        MAX_ATTEMPTS=3
+
+        for i in $$(seq 1 $$MAX_ATTEMPTS); do
+          echo "Attempt $$i of $$MAX_ATTEMPTS: Downloading keycloak_data.yaml..."
+
+          if wget -O "$$OUTPUT" "$$URL"; then
+            echo "Download successful"
+            if [ -f "$$OUTPUT" ] && [ -s "$$OUTPUT" ]; then
+              if head -1 "$$OUTPUT" | grep -q -E '^(---|\w+:)'; then
+                echo "Validation passed: File exists, non-empty, and appears to be valid YAML"
+                exit 0
+              else
+                echo "Validation failed: File does not appear to be valid YAML"
+                rm -f "$$OUTPUT"
+              fi
+            else
+              echo "Validation failed: File is missing or empty"
+            fi
+          else
+            echo "Download failed (attempt $$i)"
+          fi
+
+          if [ $$i -lt $$MAX_ATTEMPTS ]; then
+            echo "Retrying in 2 seconds..."
+            sleep 2
+          fi
+        done
+
+        echo "ERROR: Failed to download and validate keycloak_data.yaml after $$MAX_ATTEMPTS attempts"
+        exit 1
+    restart: "no"
+
+  download-fixtures:
+    image: alpine:3.23
+    volumes:
+      - configs:/configs
+    depends_on:
+      init-volumes:
+        condition: service_completed_successfully
+    command: ['wget', '-O', '/configs/service/internal/fixtures/policy_fixtures.yaml', 'https://raw.githubusercontent.com/opentdf/platform/main/service/internal/fixtures/policy_fixtures.yaml']
+    restart: "no"
+
+  download-init-script:
+    image: alpine:3.23
+    volumes:
+      - configs:/configs
+    depends_on:
+      init-volumes:
+        condition: service_completed_successfully
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        URL='https://raw.githubusercontent.com/opentdf/platform/main/.github/scripts/init-temp-keys.sh'
+        OUTPUT='/configs/init-temp-keys.sh'
+        MAX_ATTEMPTS=3
+
+        for i in $$(seq 1 $$MAX_ATTEMPTS); do
+          echo "Attempt $$i of $$MAX_ATTEMPTS: Downloading init-temp-keys.sh..."
+
+          if wget -O "$$OUTPUT" "$$URL"; then
+            echo "Download successful"
+            if [ -f "$$OUTPUT" ] && [ -s "$$OUTPUT" ]; then
+              if head -1 "$$OUTPUT" | grep -q '^#!/'; then
+                echo "Validation passed: File exists, non-empty, and appears to be a shell script"
+                exit 0
+              else
+                echo "Validation failed: File does not appear to be a valid shell script"
+                rm -f "$$OUTPUT"
+              fi
+            else
+              echo "Validation failed: File is missing or empty"
+            fi
+          else
+            echo "Download failed (attempt $$i)"
+          fi
+
+          if [ $$i -lt $$MAX_ATTEMPTS ]; then
+            echo "Retrying in 2 seconds..."
+            sleep 2
+          fi
+        done
+
+        echo "ERROR: Failed to download and validate init-temp-keys.sh after $$MAX_ATTEMPTS attempts"
+        exit 1
+    restart: "no"
+
+  generate-keys:
+    image: alpine:3.23
+    volumes:
+      - configs:/configs
+      - keys:/keys
+    depends_on:
+      download-init-script:
+        condition: service_completed_successfully
+      init-volumes:
+        condition: service_completed_successfully
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        apk add --no-cache openssl openjdk11-jre bash
+        cd /keys
+
+        # Generate KAS RSA private key
+        openssl genpkey -algorithm RSA -out /keys/kas-private.pem -pkeyopt rsa_keygen_bits:2048
+        openssl rsa -in /keys/kas-private.pem -pubout -out /keys/kas-cert.pem
+
+        # Generate ECC Key
+        openssl ecparam -name prime256v1 > /tmp/ecparams.tmp
+        openssl req -x509 -nodes -newkey ec:/tmp/ecparams.tmp -subj "/CN=kas" -keyout /keys/kas-ec-private.pem -out /keys/kas-ec-cert.pem -days 365
+
+        # Generate CA
+        openssl req -x509 -nodes -newkey RSA:2048 -subj "/CN=ca" -keyout /keys/keycloak-ca-private.pem -out /keys/keycloak-ca.pem -days 365
+
+        # Generate localhost certificate
+        printf "subjectAltName=DNS:localhost,IP:127.0.0.1" > /tmp/sanX509.conf
+        printf "[req]\ndistinguished_name=req_distinguished_name\n[req_distinguished_name]\n[alt_names]\nDNS.1=localhost\nIP.1=127.0.0.1" > /tmp/req.conf
+        openssl req -new -nodes -newkey rsa:2048 -keyout /keys/localhost.key -out /tmp/localhost.req -batch -subj "/CN=localhost" -config /tmp/req.conf
+        openssl x509 -req -in /tmp/localhost.req -CA /keys/keycloak-ca.pem -CAkey /keys/keycloak-ca-private.pem -CAcreateserial -out /keys/localhost.crt -days 3650 -sha256 -extfile /tmp/sanX509.conf
+
+        # Generate sample user certificate
+        openssl req -new -nodes -newkey rsa:2048 -keyout /keys/sampleuser.key -out /tmp/sampleuser.req -batch -subj "/CN=sampleuser"
+        openssl x509 -req -in /tmp/sampleuser.req -CA /keys/keycloak-ca.pem -CAkey /keys/keycloak-ca-private.pem -CAcreateserial -out /keys/sampleuser.crt -days 3650
+
+        # Convert to PKCS12
+        openssl pkcs12 -export -in /keys/keycloak-ca.pem -inkey /keys/keycloak-ca-private.pem -out /keys/ca.p12 -nodes -passout pass:password
+
+        # Convert PKCS12 to JKS
+        keytool -importkeystore \
+          -srckeystore /keys/ca.p12 \
+          -srcstoretype PKCS12 \
+          -destkeystore /keys/ca.jks \
+          -deststoretype JKS \
+          -srcstorepass "password" \
+          -deststorepass "password" \
+          -noprompt
+
+        echo "Keys generated successfully"
+    environment:
+      JAVA_OPTS_APPEND: "${JAVA_OPTS_APPEND:-}"
+    restart: "no"
+
+  prepare-fixtures:
+    image: alpine:3.23
+    volumes:
+      - configs:/configs
+    depends_on:
+      download-fixtures:
+        condition: service_completed_successfully
+    command:
+      - sh
+      - -c
+      - |
+        mkdir -p /configs/service/internal/fixtures
+        cd /configs
+        ln -sf /configs/service/internal/fixtures ./service
+    restart: "no"
+
+  prepare-ca-certs:
+    image: alpine:3.23
+    volumes:
+      - caddy_data:/caddy-data:ro
+      - platform_certs:/etc/ssl/certs
+    depends_on:
+      caddy:
+        condition: service_healthy
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        apk add --no-cache ca-certificates curl
+
+        ROOT_CA="/caddy-data/caddy/pki/authorities/local/root.crt"
+
+        echo "Triggering Caddy cert generation..."
+        curl -sk https://caddy:8443 >/dev/null 2>&1 || true
+        curl -sk https://caddy:9443 >/dev/null 2>&1 || true
+
+        echo "Waiting for Caddy internal root CA..."
+        for i in $$(seq 1 30); do
+          if [ -f "$$ROOT_CA" ]; then
+            echo "Found Caddy root CA: $$ROOT_CA"
+            break
+          fi
+          echo "  attempt $$i/30 — root CA not ready yet"
+          sleep 2
+        done
+
+        if [ ! -f "$$ROOT_CA" ]; then
+          echo "ERROR: Caddy root CA never appeared at $$ROOT_CA"
+          ls -laR /caddy-data/caddy/pki/ 2>/dev/null || echo "(no pki dir)"
+          exit 1
+        fi
+
+        cp "$$ROOT_CA" /usr/local/share/ca-certificates/caddy-root-ca.crt
+        update-ca-certificates
+        echo "CA certificates prepared successfully"
+    restart: "no"
+
+  ############################################################################
+  # OpenTDF Platform provisioning
+  ############################################################################
+  platform-provision-keycloak:
+    image: registry.opentdf.io/platform:nightly
+    command: ["provision", "keycloak", "-e", "https://keycloak.opentdf.local:9443/auth", "-f", "/configs/keycloak_data.yaml"]
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      opentdfdb:
+        condition: service_healthy
+      patch-platform-config:
+        condition: service_completed_successfully
+      download-keycloak-data:
+        condition: service_completed_successfully
+      generate-keys:
+        condition: service_completed_successfully
+    volumes:
+      - configs:/configs:ro
+      - keys:/keys:ro
+    environment:
+      - OPENTDF_CONFIG_FILE=/configs/opentdf.yaml
+    restart: "no"
+    extra_hosts:
+      - "keycloak.opentdf.local:host-gateway"
+
+  platform-provision-fixtures:
+    image: registry.opentdf.io/platform:nightly
+    command: ["provision", "fixtures", "--config-file", "/configs/opentdf.yaml"]
+    working_dir: /configs
+    depends_on:
+      platform-provision-keycloak:
+        condition: service_completed_successfully
+      opentdfdb:
+        condition: service_healthy
+      prepare-fixtures:
+        condition: service_completed_successfully
+      generate-keys:
+        condition: service_completed_successfully
+    volumes:
+      - configs:/configs:ro
+      - keys:/keys:ro
+    restart: "no"
+
+  ############################################################################
+  # OpenTDF Platform
+  ############################################################################
+  platform:
+    image: registry.opentdf.io/platform:nightly
+    command: ["start", "--config-file", "/configs/opentdf.yaml"]
+    depends_on:
+      platform-provision-fixtures:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_healthy
+      opentdfdb:
+        condition: service_healthy
+      generate-keys:
+        condition: service_completed_successfully
+      prepare-ca-certs:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+    volumes:
+      - configs:/configs:ro
+      - keys:/keys:ro
+      - platform_certs:/etc/ssl/certs:ro
+    extra_hosts:
+      - "keycloak.opentdf.local:host-gateway"
+    restart: unless-stopped
+
+  ############################################################################
+  # WOPI Server
+  ############################################################################
+  wopi-server:
+    build: .
+    depends_on:
+      caddy:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      wopi-provision-keycloak:
+        condition: service_completed_successfully
+      secure-object-proxy:
+        condition: service_started
+    environment:
+      WOPI_PORT: "8080"
+      WOPI_BASE_URL: "https://wopi.opentdf.local:8443"
+      # S3 endpoint points at the Secure Object Proxy (not MinIO directly)
+      S3_ENDPOINT: "http://secure-object-proxy:8080"
+      S3_REGION: "us-east-1"
+      S3_BUCKET: "encryptedstorage"
+      S3_ACCESS_KEY_ID: "dummy"
+      S3_SECRET_ACCESS_KEY: "dummy"
+      S3_USE_SSL: "false"
+      S3_FORCE_PATH_STYLE: "true"
+      WOPI_ACCESS_TOKEN_SECRET: "change-me-in-production"
+      WOPI_CLIENT_URL: "https://wopi.opentdf.local:8443"
+      # Internal URL for Collabora WOPI callbacks (avoids Caddy TLS for server-to-server)
+      WOPI_SRC_BASE_URL: "http://wopi-server:8080"
+      # S3 bearer auth — authenticate to the proxy via OIDC client credentials
+      S3_BEARER_AUTH_ENABLED: "true"
+      S3_BEARER_TOKEN_URL: "https://keycloak.opentdf.local:9443/auth/realms/opentdf/protocol/openid-connect/token"
+      S3_BEARER_CLIENT_ID: "wopi-server"
+      S3_BEARER_CLIENT_SECRET: "wopi-secret"
+      # OIDC settings
+      OIDC_ENABLED: "true"
+      OIDC_ISSUER_URL: "https://keycloak.opentdf.local:9443/auth/realms/opentdf"
+      OIDC_CLIENT_ID: "wopi-server"
+      OIDC_CLIENT_SECRET: "wopi-secret"
+      OIDC_REDIRECT_URL: "https://wopi.opentdf.local:8443/auth/callback"
+      SESSION_SECRET: "opentdf-wopi-session-secret-32b"
+      PLATFORM_ENDPOINT: "https://platform.opentdf.local:8443"
+      TDF_FULFILLABLE_OBLIGATION_FQNS: "https://example.com/obl/document-controls/value/no-download,https://example.com/obl/document-controls/value/no-copy,https://example.com/obl/document-controls/value/no-print"
+    volumes:
+      - platform_certs:/etc/ssl/certs:ro
+    extra_hosts:
+      - "keycloak.opentdf.local:host-gateway"
+      - "platform.opentdf.local:host-gateway"
+    restart: unless-stopped
+
+  ############################################################################
+  # Collabora Online
+  ############################################################################
+  collabora:
+    image: collabora/code:latest
+    environment:
+      aliasgroup1: "http://wopi-server:8080,https://wopi.opentdf.local:8443"
+      username: "admin"
+      password: "admin"
+      extra_params: "--o:ssl.enable=false --o:ssl.termination=true"
+    extra_hosts:
+      - "wopi.opentdf.local:host-gateway"
+    cap_add:
+      - MKNOD
+    restart: unless-stopped
+
+  ############################################################################
+  # Provision WOPI client in Keycloak
+  ############################################################################
+  wopi-provision-keycloak:
+    image: alpine:3.23
+    depends_on:
+      platform-provision-keycloak:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_healthy
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        apk add --no-cache curl jq
+
+        KC_URL="http://keycloak:8888/auth"
+        REALM="opentdf"
+        ADMIN_USER="admin"
+        ADMIN_PASS="changeme"
+
+        echo "Obtaining admin token..."
+        TOKEN=$$(curl -sf -X POST "$$KC_URL/realms/master/protocol/openid-connect/token" \
+          -d "client_id=admin-cli" \
+          -d "username=$$ADMIN_USER" \
+          -d "password=$$ADMIN_PASS" \
+          -d "grant_type=password" | jq -r '.access_token')
+
+        if [ -z "$$TOKEN" ] || [ "$$TOKEN" = "null" ]; then
+          echo "ERROR: Failed to obtain admin token"
+          exit 1
+        fi
+        echo "Admin token obtained"
+
+        # Check if client already exists
+        EXISTING=$$(curl -sf -H "Authorization: Bearer $$TOKEN" \
+          "$$KC_URL/admin/realms/$$REALM/clients?clientId=wopi-server" | jq -r '.[0].id // empty')
+
+        if [ -n "$$EXISTING" ]; then
+          echo "Client wopi-server already exists (id=$$EXISTING), skipping creation"
+          exit 0
+        fi
+
+        echo "Creating wopi-server client in realm $$REALM..."
+        HTTP_CODE=$$(curl -s -o /dev/null -w "%{http_code}" \
+          -X POST "$$KC_URL/admin/realms/$$REALM/clients" \
+          -H "Authorization: Bearer $$TOKEN" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "clientId": "wopi-server",
+            "name": "WOPI Server",
+            "enabled": true,
+            "protocol": "openid-connect",
+            "publicClient": false,
+            "secret": "wopi-secret",
+            "standardFlowEnabled": true,
+            "directAccessGrantsEnabled": false,
+            "serviceAccountsEnabled": true,
+            "redirectUris": ["https://wopi.opentdf.local:8443/*"],
+            "webOrigins": ["https://wopi.opentdf.local:8443"],
+            "attributes": {
+              "post.logout.redirect.uris": "https://wopi.opentdf.local:8443/*"
+            }
+          }')
+
+        if [ "$$HTTP_CODE" = "201" ]; then
+          echo "Client wopi-server created successfully"
+        else
+          echo "ERROR: Failed to create client (HTTP $$HTTP_CODE)"
+          exit 1
+        fi
+
+        # Refresh admin token (may have expired during creation)
+        TOKEN=$$(curl -sf -X POST "$$KC_URL/realms/master/protocol/openid-connect/token" \
+          -d "client_id=admin-cli" \
+          -d "username=$$ADMIN_USER" \
+          -d "password=$$ADMIN_PASS" \
+          -d "grant_type=password" | jq -r '.access_token')
+
+        # Get the wopi-server client UUID
+        CLIENT_UUID=$$(curl -sf -H "Authorization: Bearer $$TOKEN" \
+          "$$KC_URL/admin/realms/$$REALM/clients?clientId=wopi-server" | jq -r '.[0].id')
+        echo "wopi-server client UUID: $$CLIENT_UUID"
+
+        # Get the service account user for wopi-server
+        SA_USER=$$(curl -sf -H "Authorization: Bearer $$TOKEN" \
+          "$$KC_URL/admin/realms/$$REALM/clients/$$CLIENT_UUID/service-account-user" | jq -r '.id')
+        echo "Service account user ID: $$SA_USER"
+
+        # Get the opentdf-admin realm role (needed for entitlements API access)
+        ROLE_JSON=$$(curl -sf -H "Authorization: Bearer $$TOKEN" \
+          "$$KC_URL/admin/realms/$$REALM/roles/opentdf-admin")
+        echo "opentdf-admin role: $$ROLE_JSON"
+
+        # Assign opentdf-admin role to the service account
+        curl -sf -X POST \
+          "$$KC_URL/admin/realms/$$REALM/users/$$SA_USER/role-mappings/realm" \
+          -H "Authorization: Bearer $$TOKEN" \
+          -H "Content-Type: application/json" \
+          -d "[$$ROLE_JSON]"
+        echo "Assigned opentdf-admin role to wopi-server service account"
+
+        # Add audience mapper so token includes platform audience
+        curl -sf -X POST \
+          "$$KC_URL/admin/realms/$$REALM/clients/$$CLIENT_UUID/protocol-mappers/models" \
+          -H "Authorization: Bearer $$TOKEN" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "name": "platform-audience",
+            "protocol": "openid-connect",
+            "protocolMapper": "oidc-audience-mapper",
+            "config": {
+              "included.client.audience": "",
+              "included.custom.audience": "http://localhost:8080",
+              "id.token.claim": "false",
+              "access.token.claim": "true",
+              "lightweight.claim": "false"
+            }
+          }'
+        echo "Added platform audience mapper to wopi-server client"
+
+        # Add audience mapper for opentdf-sdk (needed for STS token exchange by s4proxy)
+        curl -sf -X POST \
+          "$$KC_URL/admin/realms/$$REALM/clients/$$CLIENT_UUID/protocol-mappers/models" \
+          -H "Authorization: Bearer $$TOKEN" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "name": "opentdf-sdk-audience",
+            "protocol": "openid-connect",
+            "protocolMapper": "oidc-audience-mapper",
+            "config": {
+              "included.client.audience": "opentdf-sdk",
+              "included.custom.audience": "",
+              "id.token.claim": "false",
+              "access.token.claim": "true",
+              "lightweight.claim": "false"
+            }
+          }'
+        echo "Added opentdf-sdk audience mapper to wopi-server client"
+
+        # Set email on service account (needed for s4proxy entity resolution)
+        curl -sf -X PUT \
+          "$$KC_URL/admin/realms/$$REALM/users/$$SA_USER" \
+          -H "Authorization: Bearer $$TOKEN" \
+          -H "Content-Type: application/json" \
+          -d "{\"email\": \"wopi-server@opentdf.local\", \"emailVerified\": true}"
+        echo "Set email on wopi-server service account"
+    restart: "no"
+
+  ############################################################################
+  # Secure Object Proxy — S3-compatible proxy with TDF encryption
+  ############################################################################
+  s4proxy-load-image:
+    image: alpine:3.23
+    command: ["echo", "s4proxy image already loaded into container storage"]
+    restart: "no"
+
+  secure-object-proxy:
+    image: docker.io/library/s4proxy:v1.6.0
+    platform: linux/amd64
+    command: ["start", "-f", "/app/config/config.yaml"]
+    depends_on:
+      s4proxy-load-image:
+        condition: service_completed_successfully
+      platform:
+        condition: service_started
+      keycloak:
+        condition: service_healthy
+      caddy:
+        condition: service_healthy
+      s4proxy-provision-keycloak:
+        condition: service_completed_successfully
+      prepare-ca-certs:
+        condition: service_completed_successfully
+    configs:
+      - source: s4proxy_config
+        target: /app/config/config.yaml
+    volumes:
+      - platform_certs:/etc/ssl/certs:ro
+    extra_hosts:
+      - "keycloak.opentdf.local:host-gateway"
+      - "platform.opentdf.local:host-gateway"
+    restart: unless-stopped
+
+  ############################################################################
+  # Provision Secure Object Proxy client in Keycloak
+  ############################################################################
+  s4proxy-provision-keycloak:
+    image: alpine:3.23
+    depends_on:
+      platform-provision-keycloak:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_healthy
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        apk add --no-cache curl jq
+
+        KC_URL="http://keycloak:8888/auth"
+        REALM="opentdf"
+        ADMIN_USER="admin"
+        ADMIN_PASS="changeme"
+
+        echo "Obtaining admin token..."
+        TOKEN=$$(curl -sf -X POST "$$KC_URL/realms/master/protocol/openid-connect/token" \
+          -d "client_id=admin-cli" \
+          -d "username=$$ADMIN_USER" \
+          -d "password=$$ADMIN_PASS" \
+          -d "grant_type=password" | jq -r '.access_token')
+
+        if [ -z "$$TOKEN" ] || [ "$$TOKEN" = "null" ]; then
+          echo "ERROR: Failed to obtain admin token"
+          exit 1
+        fi
+        echo "Admin token obtained"
+
+        # Check if secure-object-proxy client already exists
+        EXISTING=$$(curl -sf -H "Authorization: Bearer $$TOKEN" \
+          "$$KC_URL/admin/realms/$$REALM/clients?clientId=secure-object-proxy" | jq -r '.[0].id // empty')
+
+        if [ -n "$$EXISTING" ]; then
+          echo "Client secure-object-proxy already exists (id=$$EXISTING), skipping creation"
+        else
+          echo "Creating secure-object-proxy client in realm $$REALM..."
+          HTTP_CODE=$$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "$$KC_URL/admin/realms/$$REALM/clients" \
+            -H "Authorization: Bearer $$TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "clientId": "secure-object-proxy",
+              "name": "Secure Object Proxy",
+              "enabled": true,
+              "protocol": "openid-connect",
+              "publicClient": false,
+              "secret": "s4proxy-secret",
+              "standardFlowEnabled": false,
+              "directAccessGrantsEnabled": false,
+              "serviceAccountsEnabled": true,
+              "redirectUris": [],
+              "webOrigins": ["+"]
+            }')
+
+          if [ "$$HTTP_CODE" = "201" ]; then
+            echo "Client secure-object-proxy created successfully"
+          else
+            echo "ERROR: Failed to create secure-object-proxy client (HTTP $$HTTP_CODE)"
+            exit 1
+          fi
+        fi
+
+        # Ensure opentdf-sdk client exists and configure it for s4proxy
+        SDK_CLIENT=$$(curl -sf -H "Authorization: Bearer $$TOKEN" \
+          "$$KC_URL/admin/realms/$$REALM/clients?clientId=opentdf-sdk" | jq -r '.[0].id // empty')
+
+        if [ -z "$$SDK_CLIENT" ]; then
+          echo "WARNING: opentdf-sdk client not found — the proxy may not be able to exchange tokens"
+        else
+          echo "opentdf-sdk client found (id=$$SDK_CLIENT)"
+
+          # Get opentdf-sdk service account user
+          SDK_SA_USER=$$(curl -sf -H "Authorization: Bearer $$TOKEN" \
+            "$$KC_URL/admin/realms/$$REALM/clients/$$SDK_CLIENT/service-account-user" | jq -r '.id')
+          echo "opentdf-sdk service account user: $$SDK_SA_USER"
+
+          # Assign opentdf-admin role to opentdf-sdk (needed for entity resolution API)
+          ROLE_JSON=$$(curl -sf -H "Authorization: Bearer $$TOKEN" \
+            "$$KC_URL/admin/realms/$$REALM/roles/opentdf-admin")
+          curl -sf -X POST \
+            "$$KC_URL/admin/realms/$$REALM/users/$$SDK_SA_USER/role-mappings/realm" \
+            -H "Authorization: Bearer $$TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "[$$ROLE_JSON]"
+          echo "Assigned opentdf-admin role to opentdf-sdk service account"
+
+          # Set email on opentdf-sdk service account (needed for entity resolution)
+          curl -sf -X PUT \
+            "$$KC_URL/admin/realms/$$REALM/users/$$SDK_SA_USER" \
+            -H "Authorization: Bearer $$TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"email": "opentdf-sdk@opentdf.local", "emailVerified": true}'
+          echo "Set email on opentdf-sdk service account"
+        fi
+
+        echo "Secure Object Proxy Keycloak provisioning complete"
+    restart: "no"
+
+  ############################################################################
+  # Provision subject mappings for wopi-server in the OpenTDF platform
+  ############################################################################
+  wopi-provision-platform:
+    image: alpine:3.23
+    depends_on:
+      platform:
+        condition: service_started
+      wopi-provision-keycloak:
+        condition: service_completed_successfully
+      prepare-ca-certs:
+        condition: service_completed_successfully
+    volumes:
+      - platform_certs:/etc/ssl/certs:ro
+    extra_hosts:
+      - "keycloak.opentdf.local:host-gateway"
+      - "platform.opentdf.local:host-gateway"
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        apk add --no-cache curl jq
+
+        KC_URL="https://keycloak.opentdf.local:9443/auth"
+        PLATFORM_URL="https://platform.opentdf.local:8443"
+
+        echo "Waiting for platform to be ready..."
+        for i in $$(seq 1 30); do
+          if curl -sf "$$PLATFORM_URL/healthz" >/dev/null 2>&1; then
+            echo "Platform is ready"
+            break
+          fi
+          echo "  attempt $$i/30"
+          sleep 5
+        done
+
+        echo "Obtaining wopi-server token..."
+        TOKEN=$$(curl -sf -X POST "$$KC_URL/realms/opentdf/protocol/openid-connect/token" \
+          -d "client_id=wopi-server" \
+          -d "client_secret=wopi-secret" \
+          -d "grant_type=client_credentials" | jq -r '.access_token')
+
+        if [ -z "$$TOKEN" ] || [ "$$TOKEN" = "null" ]; then
+          echo "ERROR: Failed to obtain wopi-server token"
+          exit 1
+        fi
+        echo "Token obtained"
+
+        # Get all active attribute values with valid FQNs
+        echo "Fetching attribute values from platform..."
+        ATTR_VALUES=$$(curl -sf -X POST "$$PLATFORM_URL/policy.attributes.AttributesService/ListAttributes" \
+          -H "Authorization: Bearer $$TOKEN" \
+          -H "Content-Type: application/json" \
+          -H "Connect-Protocol-Version: 1" \
+          -d '{}' | jq -r '
+            [.attributes[] | select(.active == true) | .values[] |
+             select(.fqn != null and .fqn != "" and (.fqn | endswith("/") | not)) |
+             {id: .id, fqn: .fqn}] | .[] | "\(.id)|\(.fqn)"')
+
+        if [ -z "$$ATTR_VALUES" ]; then
+          echo "No attribute values found, skipping subject mapping creation"
+          exit 0
+        fi
+
+        # Get standard action IDs (create, read) from an existing subject mapping
+        STD_ACTIONS=$$(curl -sf -X POST "$$PLATFORM_URL/policy.subjectmapping.SubjectMappingService/ListSubjectMappings" \
+          -H "Authorization: Bearer $$TOKEN" \
+          -H "Content-Type: application/json" \
+          -H "Connect-Protocol-Version: 1" \
+          -d '{}' | jq '[.subjectMappings[0].actions[] | {id: .id}]')
+
+        # Create custom "view" and "decrypt" actions (s4proxy checks these action names)
+        VIEW_ID=$$(curl -sf -X POST "$$PLATFORM_URL/policy.actions.ActionService/CreateAction" \
+          -H "Authorization: Bearer $$TOKEN" \
+          -H "Content-Type: application/json" \
+          -H "Connect-Protocol-Version: 1" \
+          -d '{"name":"view"}' | jq -r '.action.id // empty')
+        if [ -z "$$VIEW_ID" ]; then
+          # Action may already exist — look it up
+          VIEW_ID=$$(curl -sf -X POST "$$PLATFORM_URL/policy.actions.ActionService/ListActions" \
+            -H "Authorization: Bearer $$TOKEN" \
+            -H "Content-Type: application/json" \
+            -H "Connect-Protocol-Version: 1" \
+            -d '{}' | jq -r '(.actionsCustom // [])[] | select(.name == "view") | .id')
+        fi
+        DECRYPT_ID=$$(curl -sf -X POST "$$PLATFORM_URL/policy.actions.ActionService/CreateAction" \
+          -H "Authorization: Bearer $$TOKEN" \
+          -H "Content-Type: application/json" \
+          -H "Connect-Protocol-Version: 1" \
+          -d '{"name":"decrypt"}' | jq -r '.action.id // empty')
+        if [ -z "$$DECRYPT_ID" ]; then
+          DECRYPT_ID=$$(curl -sf -X POST "$$PLATFORM_URL/policy.actions.ActionService/ListActions" \
+            -H "Authorization: Bearer $$TOKEN" \
+            -H "Content-Type: application/json" \
+            -H "Connect-Protocol-Version: 1" \
+            -d '{}' | jq -r '(.actionsCustom // [])[] | select(.name == "decrypt") | .id')
+        fi
+        echo "Custom actions: view=$$VIEW_ID decrypt=$$DECRYPT_ID"
+
+        # Combine standard + custom actions
+        ACTIONS_JSON=$$(echo "$$STD_ACTIONS" | jq --arg v "$$VIEW_ID" --arg d "$$DECRYPT_ID" \
+          '. + [{id: $$v}, {id: $$d}]')
+        echo "Using actions: $$ACTIONS_JSON"
+
+        # Check if wopi-server subject mappings already exist
+        EXISTING=$$(curl -sf -X POST "$$PLATFORM_URL/policy.subjectmapping.SubjectMappingService/ListSubjectMappings" \
+          -H "Authorization: Bearer $$TOKEN" \
+          -H "Content-Type: application/json" \
+          -H "Connect-Protocol-Version: 1" \
+          -d '{}' | jq -r '.subjectMappings[] |
+            select(.subjectConditionSet.subjectSets[].conditionGroups[].conditions[] |
+              select(.subjectExternalValues[] == "wopi-server")) | .id' | head -1)
+
+        if [ -n "$$EXISTING" ]; then
+          echo "wopi-server subject mappings already exist, skipping"
+          exit 0
+        fi
+
+        # Create subject condition set with first attribute value, reuse for rest
+        FIRST_ATTR_ID=$$(echo "$$ATTR_VALUES" | head -1 | cut -d'|' -f1)
+        FIRST_ATTR_FQN=$$(echo "$$ATTR_VALUES" | head -1 | cut -d'|' -f2)
+        echo "Creating first subject mapping for $$FIRST_ATTR_FQN ($$FIRST_ATTR_ID)..."
+
+        FIRST_RESULT=$$(curl -sf -X POST "$$PLATFORM_URL/policy.subjectmapping.SubjectMappingService/CreateSubjectMapping" \
+          -H "Authorization: Bearer $$TOKEN" \
+          -H "Content-Type: application/json" \
+          -H "Connect-Protocol-Version: 1" \
+          -d "{
+            \"attributeValueId\": \"$$FIRST_ATTR_ID\",
+            \"actions\": $$ACTIONS_JSON,
+            \"newSubjectConditionSet\": {
+              \"subjectSets\": [{
+                \"conditionGroups\": [{
+                  \"booleanOperator\": \"CONDITION_BOOLEAN_TYPE_ENUM_OR\",
+                  \"conditions\": [{
+                    \"subjectExternalSelectorValue\": \".clientId\",
+                    \"operator\": \"SUBJECT_MAPPING_OPERATOR_ENUM_IN\",
+                    \"subjectExternalValues\": [\"wopi-server\"]
+                  }]
+                }]
+              }]
+            }
+          }")
+        echo "First mapping result: $$(echo $$FIRST_RESULT | jq -r '.subjectMapping.id // .message')"
+
+        SCS_ID=$$(echo "$$FIRST_RESULT" | jq -r '.subjectMapping.subjectConditionSet.id')
+        echo "Subject condition set ID: $$SCS_ID"
+
+        # Create mappings for remaining attribute values
+        echo "$$ATTR_VALUES" | tail -n +2 | while IFS='|' read ATTR_ID ATTR_FQN; do
+          [ -z "$$ATTR_ID" ] && continue
+          RESULT=$$(curl -sf -X POST "$$PLATFORM_URL/policy.subjectmapping.SubjectMappingService/CreateSubjectMapping" \
+            -H "Authorization: Bearer $$TOKEN" \
+            -H "Content-Type: application/json" \
+            -H "Connect-Protocol-Version: 1" \
+            -d "{
+              \"attributeValueId\": \"$$ATTR_ID\",
+              \"actions\": $$ACTIONS_JSON,
+              \"existingSubjectConditionSetId\": \"$$SCS_ID\"
+            }")
+          echo "  $$ATTR_FQN: $$(echo $$RESULT | jq -r '.subjectMapping.id // .message')"
+        done
+
+        echo "wopi-server subject mapping provisioning complete"
+    restart: "no"
+
+volumes:
+  keys:
+    name: opentdf_keys
+  configs:
+    name: opentdf_configs
+  caddy_data:
+  platform_certs:
+    name: opentdf_platform_certs

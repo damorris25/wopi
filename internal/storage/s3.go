@@ -1,9 +1,12 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
+	"net/http"
 	"path/filepath"
 	"strings"
 
@@ -21,7 +24,8 @@ type FileInfo struct {
 	Version      string // ETag or version identifier
 	LastModified string
 	ContentType  string
-	Owner        string // Derived from metadata or default
+	Owner        string            // Derived from metadata or default
+	Metadata     map[string]string // Raw S3 user metadata (without x-amz-meta- prefix)
 }
 
 // S3Client defines the subset of S3 operations used by the storage layer.
@@ -32,6 +36,27 @@ type S3Client interface {
 	HeadObject(ctx context.Context, params *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error)
 	DeleteObject(ctx context.Context, params *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
 	CopyObject(ctx context.Context, params *s3.CopyObjectInput, optFns ...func(*s3.Options)) (*s3.CopyObjectOutput, error)
+	ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
+}
+
+// FileListItem represents a file entry returned by ListFiles.
+type FileListItem struct {
+	FileID  string `json:"file_id"`
+	Name    string `json:"name"`
+	Size    int64  `json:"size"`
+	LastMod string `json:"last_modified,omitempty"`
+}
+
+// FolderListItem represents a subfolder entry returned by ListFilesInFolder.
+type FolderListItem struct {
+	Name   string `json:"name"`   // e.g. "subfolder"
+	Prefix string `json:"prefix"` // e.g. "docs/subfolder/"
+}
+
+// FolderListing holds the files and subfolders at a given prefix.
+type FolderListing struct {
+	Files   []FileListItem   `json:"files"`
+	Folders []FolderListItem `json:"folders"`
 }
 
 // S3Storage provides file operations backed by an S3-compatible object store.
@@ -42,13 +67,27 @@ type S3Storage struct {
 
 // S3Config holds configuration for the S3 storage backend.
 type S3Config struct {
-	Endpoint        string
-	Region          string
-	Bucket          string
-	AccessKeyID     string
-	SecretAccessKey  string
-	UseSSL          bool
-	ForcePathStyle  bool
+	Endpoint       string
+	Region         string
+	Bucket         string
+	AccessKeyID    string
+	SecretAccessKey string
+	UseSSL         bool
+	ForcePathStyle bool
+
+	// BearerAuth enables OIDC bearer token injection for S3 proxy auth.
+	// When set, a BearerTokenTransport wraps the HTTP client so every
+	// request carries an Authorization header obtained via client credentials.
+	BearerAuth *BearerAuthConfig
+}
+
+// BearerAuthConfig holds the credentials needed to obtain OIDC bearer tokens
+// for authenticating to an S3-compatible proxy (e.g. Virtru Secure Object Proxy).
+type BearerAuthConfig struct {
+	TokenURL     string // OIDC token endpoint
+	ClientID     string
+	ClientSecret string
+	Logger       *slog.Logger // optional; logs token source per request
 }
 
 // NewS3Storage creates a new S3Storage using the provided configuration.
@@ -62,7 +101,7 @@ func NewS3Storage(ctx context.Context, cfg S3Config) (*S3Storage, error) {
 		},
 	)
 
-	awsCfg, err := config.LoadDefaultConfig(ctx,
+	opts := []func(*config.LoadOptions) error{
 		config.WithRegion(cfg.Region),
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
 			cfg.AccessKeyID,
@@ -70,13 +109,30 @@ func NewS3Storage(ctx context.Context, cfg S3Config) (*S3Storage, error) {
 			"",
 		)),
 		config.WithEndpointResolverWithOptions(resolver),
-	)
+	}
+
+	// When bearer auth is configured, wrap the HTTP client so every S3
+	// request carries an OIDC bearer token for the proxy.
+	if cfg.BearerAuth != nil {
+		transport := &BearerTokenTransport{
+			TokenURL:     cfg.BearerAuth.TokenURL,
+			ClientID:     cfg.BearerAuth.ClientID,
+			ClientSecret: cfg.BearerAuth.ClientSecret,
+			Logger:       cfg.BearerAuth.Logger,
+		}
+		opts = append(opts, config.WithHTTPClient(&http.Client{Transport: transport}))
+	}
+
+	awsCfg, err := config.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
 	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
 		o.UsePathStyle = cfg.ForcePathStyle
+		// Disable request checksums so PutObject works with unseekable
+		// streams over plain HTTP (e.g. when proxying through s4proxy).
+		o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
 	})
 
 	return &S3Storage{
@@ -134,6 +190,7 @@ func (s *S3Storage) GetFileInfo(ctx context.Context, fileID string) (*FileInfo, 
 		LastModified: lastModified,
 		ContentType:  contentType,
 		Owner:        owner,
+		Metadata:     out.Metadata,
 	}, nil
 }
 
@@ -154,10 +211,16 @@ func (s *S3Storage) GetFile(ctx context.Context, fileID string) (io.ReadCloser, 
 		etag = strings.Trim(*out.ETag, "\"")
 	}
 
+	contentType := "application/octet-stream"
+	if out.ContentType != nil {
+		contentType = *out.ContentType
+	}
+
 	info := &FileInfo{
-		Name:    filepath.Base(key),
-		Size:    safeContentLength(out.ContentLength),
-		Version: etag,
+		Name:        filepath.Base(key),
+		Size:        safeContentLength(out.ContentLength),
+		Version:     etag,
+		ContentType: contentType,
 	}
 
 	return out.Body, info, nil
@@ -169,10 +232,16 @@ func (s *S3Storage) PutFile(ctx context.Context, fileID string, body io.Reader, 
 
 	contentType := contentTypeForFile(key)
 
+	// Buffer the body so the AWS SDK can seek for payload signing.
+	seekBody, err := toSeekableReader(body)
+	if err != nil {
+		return "", fmt.Errorf("buffering body for %q: %w", key, err)
+	}
+
 	out, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:        aws.String(s.bucket),
 		Key:           aws.String(key),
-		Body:          body,
+		Body:          seekBody,
 		ContentLength: aws.Int64(size),
 		ContentType:   aws.String(contentType),
 	})
@@ -231,6 +300,157 @@ func (s *S3Storage) RenameFile(ctx context.Context, fileID, newName string) (new
 	return keyToFileID(newKey), nil
 }
 
+// ListFiles returns all objects in the bucket with the given prefix.
+func (s *S3Storage) ListFiles(ctx context.Context, prefix string) ([]FileListItem, error) {
+	input := &s3.ListObjectsV2Input{
+		Bucket: aws.String(s.bucket),
+	}
+	if prefix != "" {
+		input.Prefix = aws.String(prefix)
+	}
+
+	var items []FileListItem
+	for {
+		out, err := s.client.ListObjectsV2(ctx, input)
+		if err != nil {
+			return nil, fmt.Errorf("list objects: %w", err)
+		}
+		for _, obj := range out.Contents {
+			key := aws.ToString(obj.Key)
+			// Skip "directory" markers (keys ending with /)
+			if strings.HasSuffix(key, "/") {
+				continue
+			}
+			lastMod := ""
+			if obj.LastModified != nil {
+				lastMod = obj.LastModified.UTC().Format("2006-01-02T15:04:05Z")
+			}
+			items = append(items, FileListItem{
+				FileID:  keyToFileID(key),
+				Name:    filepath.Base(key),
+				Size:    safeContentLength(obj.Size),
+				LastMod: lastMod,
+			})
+		}
+		if !aws.ToBool(out.IsTruncated) {
+			break
+		}
+		input.ContinuationToken = out.NextContinuationToken
+	}
+	return items, nil
+}
+
+// ListFilesInFolder returns files and subfolders at the given prefix using
+// the S3 delimiter convention. Unlike ListFiles it does not recurse into
+// subfolders.
+func (s *S3Storage) ListFilesInFolder(ctx context.Context, prefix string) (*FolderListing, error) {
+	delimiter := "/"
+	input := &s3.ListObjectsV2Input{
+		Bucket:    aws.String(s.bucket),
+		Delimiter: aws.String(delimiter),
+	}
+	if prefix != "" {
+		input.Prefix = aws.String(prefix)
+	}
+
+	listing := &FolderListing{}
+	for {
+		out, err := s.client.ListObjectsV2(ctx, input)
+		if err != nil {
+			return nil, fmt.Errorf("list objects in folder: %w", err)
+		}
+
+		for _, obj := range out.Contents {
+			key := aws.ToString(obj.Key)
+			if strings.HasSuffix(key, "/") {
+				continue
+			}
+			lastMod := ""
+			if obj.LastModified != nil {
+				lastMod = obj.LastModified.UTC().Format("2006-01-02T15:04:05Z")
+			}
+			listing.Files = append(listing.Files, FileListItem{
+				FileID:  keyToFileID(key),
+				Name:    filepath.Base(key),
+				Size:    safeContentLength(obj.Size),
+				LastMod: lastMod,
+			})
+		}
+
+		for _, cp := range out.CommonPrefixes {
+			p := aws.ToString(cp.Prefix)
+			name := strings.TrimSuffix(strings.TrimPrefix(p, prefix), "/")
+			listing.Folders = append(listing.Folders, FolderListItem{
+				Name:   name,
+				Prefix: p,
+			})
+		}
+
+		if !aws.ToBool(out.IsTruncated) {
+			break
+		}
+		input.ContinuationToken = out.NextContinuationToken
+	}
+
+	if listing.Files == nil {
+		listing.Files = []FileListItem{}
+	}
+	if listing.Folders == nil {
+		listing.Folders = []FolderListItem{}
+	}
+
+	return listing, nil
+}
+
+// PutFileWithMetadata writes file contents to storage with custom S3 metadata.
+// When metadata is nil or empty it behaves identically to PutFile.
+func (s *S3Storage) PutFileWithMetadata(ctx context.Context, fileID string, body io.Reader, size int64, metadata map[string]string) (version string, err error) {
+	key := fileIDToKey(fileID)
+	contentType := contentTypeForFile(key)
+
+	// Buffer the body so the AWS SDK can seek for payload signing.
+	seekBody, err := toSeekableReader(body)
+	if err != nil {
+		return "", fmt.Errorf("buffering body for %q: %w", key, err)
+	}
+
+	input := &s3.PutObjectInput{
+		Bucket:        aws.String(s.bucket),
+		Key:           aws.String(key),
+		Body:          seekBody,
+		ContentLength: aws.Int64(size),
+		ContentType:   aws.String(contentType),
+	}
+	if len(metadata) > 0 {
+		input.Metadata = metadata
+	}
+
+	out, err := s.client.PutObject(ctx, input)
+	if err != nil {
+		return "", fmt.Errorf("put object %q: %w", key, err)
+	}
+
+	etag := ""
+	if out.ETag != nil {
+		etag = strings.Trim(*out.ETag, "\"")
+	}
+	return etag, nil
+}
+
+// toSeekableReader ensures the reader is seekable (required by the AWS SDK
+// for payload signing). If the reader already implements io.ReadSeeker it is
+// returned as-is; otherwise the content is buffered into a bytes.Reader.
+func toSeekableReader(r io.Reader) (io.ReadSeeker, error) {
+	if rs, ok := r.(io.ReadSeeker); ok {
+		return rs, nil
+	}
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	return bytes.NewReader(data), nil
+}
+
 // fileIDToKey converts a WOPI file ID to an S3 object key.
 // File IDs use dots as path separators to be URL-safe.
 func fileIDToKey(fileID string) string {
@@ -240,6 +460,11 @@ func fileIDToKey(fileID string) string {
 // keyToFileID converts an S3 object key to a WOPI file ID.
 func keyToFileID(key string) string {
 	return strings.ReplaceAll(key, "/", "|")
+}
+
+// KeyToFileID is the exported version of keyToFileID for use by other packages.
+func KeyToFileID(key string) string {
+	return keyToFileID(key)
 }
 
 func contentTypeForFile(key string) string {
