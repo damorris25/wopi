@@ -41,6 +41,7 @@ All documents are stored in an S3-compatible bucket (AWS S3, MinIO, Ceph, Digita
 
 | Operation | Method | Endpoint | Description |
 |-----------|--------|----------|-------------|
+| Discovery | `GET` | `/hosting/discovery` | Returns WOPI discovery XML (supported file types and actions) |
 | CheckFileInfo | `GET` | `/wopi/files/{file_id}` | Returns file metadata and user permissions |
 | GetFile | `GET` | `/wopi/files/{file_id}/contents` | Returns the binary file contents |
 | PutFile | `POST` | `/wopi/files/{file_id}/contents` | Writes new file contents (requires lock) |
@@ -215,7 +216,6 @@ The general integration pattern:
 ## Limitations
 
 - **Lock storage is in-memory.** Locks are lost on server restart. For production use with multiple server instances, replace the lock manager with a distributed store (Redis, DynamoDB, etc.).
-- **No WOPI discovery endpoint.** The server does not implement WOPI discovery — your application must know the WOPI client's action URLs.
 - **No proof key validation.** The server uses HMAC-based access tokens but does not validate WOPI proof keys from the client. This is acceptable for deployments behind a private network but should be added for public-facing deployments.
 
 ## License

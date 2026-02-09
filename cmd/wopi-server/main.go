@@ -168,6 +168,9 @@ func main() {
 		mux.HandleFunc("GET /api/files/download", h.DownloadFile)
 	}
 
+	// WOPI discovery endpoint (no auth required — used by integrators)
+	mux.HandleFunc("GET /hosting/discovery", h.Discovery)
+
 	// Health check (no auth required)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
