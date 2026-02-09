@@ -56,6 +56,10 @@ type Config struct {
 	// and S3BearerAuth), the WOPI server decrypts TDF files client-side using
 	// the OpenTDF SDK, declaring these obligations as fulfillable.
 	TDFFulfillableObligationFQNs []string
+
+	// TDFInsecureSkipVerify disables TLS certificate verification for the
+	// OpenTDF SDK connection. For development with self-signed certs only.
+	TDFInsecureSkipVerify bool
 }
 
 // LoadFromEnv loads configuration from environment variables.
@@ -156,6 +160,14 @@ func LoadFromEnv() (*Config, error) {
 	cfg.SessionSecret = getEnvOrDefault("SESSION_SECRET", "")
 
 	cfg.PlatformEndpoint = getEnvOrDefault("PLATFORM_ENDPOINT", "")
+
+	if v := os.Getenv("TDF_INSECURE_SKIP_VERIFY"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid TDF_INSECURE_SKIP_VERIFY: %w", err)
+		}
+		cfg.TDFInsecureSkipVerify = b
+	}
 
 	if v := os.Getenv("TDF_FULFILLABLE_OBLIGATION_FQNS"); v != "" {
 		for _, fqn := range strings.Split(v, ",") {

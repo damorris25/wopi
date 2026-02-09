@@ -3,6 +3,7 @@ package middleware
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -172,5 +173,56 @@ func TestWOPIAuth_InvalidToken(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for invalid token, got %d", rec.Code)
+	}
+}
+
+func TestTokenValidator_Base64Encoded(t *testing.T) {
+	tv := NewTokenValidator("test-secret")
+
+	token := tv.GenerateToken("admin@example.com", "docs|report.docx")
+
+	// Token should not contain the raw user ID.
+	if strings.Contains(token, "admin@example.com") {
+		t.Errorf("token should not contain plaintext user ID, got %q", token)
+	}
+
+	// Token should still validate correctly.
+	userID, valid := tv.ValidateToken(token, "docs|report.docx")
+	if !valid {
+		t.Fatal("expected base64-encoded token to be valid")
+	}
+	if userID != "admin@example.com" {
+		t.Fatalf("expected user ID %q, got %q", "admin@example.com", userID)
+	}
+}
+
+func TestTokenValidator_RawTokenRejected(t *testing.T) {
+	tv := NewTokenValidator("test-secret")
+
+	// A raw (non-base64) token in the old format should be rejected.
+	rawToken := "fakesig:user1:9999999999"
+	_, valid := tv.ValidateToken(rawToken, "file1")
+	if valid {
+		t.Fatal("expected raw (non-base64) token to be rejected")
+	}
+}
+
+func TestTokenValidator_URLSafe(t *testing.T) {
+	tv := NewTokenValidator("test-secret")
+
+	token := tv.GenerateToken("user+special/chars", "file|with|pipes")
+
+	// Token should be URL-safe (no +, /, or = characters).
+	if strings.ContainsAny(token, "+/=") {
+		t.Errorf("token should be URL-safe, got %q", token)
+	}
+
+	// Should still validate.
+	userID, valid := tv.ValidateToken(token, "file|with|pipes")
+	if !valid {
+		t.Fatal("expected URL-safe token to be valid")
+	}
+	if userID != "user+special/chars" {
+		t.Fatalf("expected user ID %q, got %q", "user+special/chars", userID)
 	}
 }

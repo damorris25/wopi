@@ -25,11 +25,29 @@ type LockManager struct {
 	expiration time.Duration
 }
 
-// NewLockManager creates a new LockManager with the specified lock expiration duration.
+// NewLockManager creates a new LockManager with the specified lock expiration
+// duration. A background goroutine periodically purges expired entries.
 func NewLockManager(expiration time.Duration) *LockManager {
-	return &LockManager{
+	lm := &LockManager{
 		locks:      make(map[string]*LockInfo),
 		expiration: expiration,
+	}
+	go lm.cleanupLoop()
+	return lm
+}
+
+// cleanupLoop runs every expiration interval and removes expired locks.
+func (lm *LockManager) cleanupLoop() {
+	ticker := time.NewTicker(lm.expiration)
+	defer ticker.Stop()
+	for range ticker.C {
+		lm.mu.Lock()
+		for fileID, info := range lm.locks {
+			if info.IsExpired() {
+				delete(lm.locks, fileID)
+			}
+		}
+		lm.mu.Unlock()
 	}
 }
 

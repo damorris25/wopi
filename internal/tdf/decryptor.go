@@ -18,6 +18,7 @@ type Config struct {
 	PlatformEndpoint       string
 	ClientID, ClientSecret string
 	FulfillableObligations []string
+	InsecureSkipVerify     bool // skip TLS verification (development only)
 	Logger                 *slog.Logger
 }
 
@@ -30,10 +31,13 @@ type Decryptor struct {
 
 // NewDecryptor creates a Decryptor that connects to the given OpenTDF platform.
 func NewDecryptor(cfg Config) (*Decryptor, error) {
-	s, err := sdk.New(cfg.PlatformEndpoint,
+	opts := []sdk.Option{
 		sdk.WithClientCredentials(cfg.ClientID, cfg.ClientSecret, nil),
-		sdk.WithInsecureSkipVerifyConn(),
-	)
+	}
+	if cfg.InsecureSkipVerify {
+		opts = append(opts, sdk.WithInsecureSkipVerifyConn())
+	}
+	s, err := sdk.New(cfg.PlatformEndpoint, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("tdf: creating SDK: %w", err)
 	}

@@ -76,7 +76,7 @@ func (t *tokenTransport) getToken() (string, error) {
 		"client_secret": {t.clientSecret},
 	}
 
-	resp, err := (&http.Client{Transport: t.transport()}).Post(
+	resp, err := (&http.Client{Transport: t.transport(), Timeout: 30 * time.Second}).Post(
 		t.tokenURL,
 		"application/x-www-form-urlencoded",
 		strings.NewReader(data.Encode()),
@@ -86,7 +86,7 @@ func (t *tokenTransport) getToken() (string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MB limit
 	if err != nil {
 		return "", fmt.Errorf("read token response: %w", err)
 	}
@@ -118,7 +118,7 @@ func NewClient(cfg ClientConfig) *Client {
 	}
 	return &Client{
 		endpoint:   strings.TrimRight(cfg.Endpoint, "/"),
-		httpClient: &http.Client{Transport: transport},
+		httpClient: &http.Client{Transport: transport, Timeout: 30 * time.Second},
 	}
 }
 
@@ -142,7 +142,7 @@ func (c *Client) connectPost(ctx context.Context, path string, reqBody any) ([]b
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10 MB limit
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}

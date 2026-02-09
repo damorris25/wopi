@@ -151,6 +151,9 @@ func NewS3StorageWithClient(client S3Client, bucket string) *S3Storage {
 
 // GetFileInfo retrieves metadata about a file.
 func (s *S3Storage) GetFileInfo(ctx context.Context, fileID string) (*FileInfo, error) {
+	if err := validateFileID(fileID); err != nil {
+		return nil, err
+	}
 	key := fileIDToKey(fileID)
 
 	out, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
@@ -196,6 +199,9 @@ func (s *S3Storage) GetFileInfo(ctx context.Context, fileID string) (*FileInfo, 
 
 // GetFile retrieves the file contents.
 func (s *S3Storage) GetFile(ctx context.Context, fileID string) (io.ReadCloser, *FileInfo, error) {
+	if err := validateFileID(fileID); err != nil {
+		return nil, nil, err
+	}
 	key := fileIDToKey(fileID)
 
 	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
@@ -228,6 +234,9 @@ func (s *S3Storage) GetFile(ctx context.Context, fileID string) (io.ReadCloser, 
 
 // PutFile writes file contents to storage.
 func (s *S3Storage) PutFile(ctx context.Context, fileID string, body io.Reader, size int64) (version string, err error) {
+	if err := validateFileID(fileID); err != nil {
+		return "", err
+	}
 	key := fileIDToKey(fileID)
 
 	contentType := contentTypeForFile(key)
@@ -259,6 +268,9 @@ func (s *S3Storage) PutFile(ctx context.Context, fileID string, body io.Reader, 
 
 // DeleteFile removes a file from storage.
 func (s *S3Storage) DeleteFile(ctx context.Context, fileID string) error {
+	if err := validateFileID(fileID); err != nil {
+		return err
+	}
 	key := fileIDToKey(fileID)
 
 	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
@@ -274,6 +286,13 @@ func (s *S3Storage) DeleteFile(ctx context.Context, fileID string) error {
 
 // RenameFile copies a file to a new key and deletes the old one.
 func (s *S3Storage) RenameFile(ctx context.Context, fileID, newName string) (newFileID string, err error) {
+	if err := validateFileID(fileID); err != nil {
+		return "", err
+	}
+	// Validate newName: reject path separators and traversal sequences.
+	if strings.ContainsAny(newName, "/\\|") || newName == ".." || newName == "." || newName == "" {
+		return "", fmt.Errorf("invalid file name: %q", newName)
+	}
 	oldKey := fileIDToKey(fileID)
 	dir := filepath.Dir(oldKey)
 	newKey := filepath.Join(dir, newName)
@@ -405,6 +424,9 @@ func (s *S3Storage) ListFilesInFolder(ctx context.Context, prefix string) (*Fold
 // PutFileWithMetadata writes file contents to storage with custom S3 metadata.
 // When metadata is nil or empty it behaves identically to PutFile.
 func (s *S3Storage) PutFileWithMetadata(ctx context.Context, fileID string, body io.Reader, size int64, metadata map[string]string) (version string, err error) {
+	if err := validateFileID(fileID); err != nil {
+		return "", err
+	}
 	key := fileIDToKey(fileID)
 	contentType := contentTypeForFile(key)
 
@@ -437,22 +459,48 @@ func (s *S3Storage) PutFileWithMetadata(ctx context.Context, fileID string, body
 	return etag, nil
 }
 
+// maxUploadSize is the maximum body size accepted by PutFile (256 MB).
+const maxUploadSize = 256 << 20
+
 // toSeekableReader ensures the reader is seekable (required by the AWS SDK
 // for payload signing). If the reader already implements io.ReadSeeker it is
 // returned as-is; otherwise the content is buffered into a bytes.Reader.
+// Reads are limited to maxUploadSize to prevent memory exhaustion.
 func toSeekableReader(r io.Reader) (io.ReadSeeker, error) {
 	if rs, ok := r.(io.ReadSeeker); ok {
 		return rs, nil
 	}
-	data, err := io.ReadAll(r)
+	limited := io.LimitReader(r, maxUploadSize+1)
+	data, err := io.ReadAll(limited)
 	if err != nil {
 		return nil, err
+	}
+	if len(data) > maxUploadSize {
+		return nil, fmt.Errorf("request body exceeds %d byte limit", maxUploadSize)
 	}
 	return bytes.NewReader(data), nil
 }
 
+// validateFileID checks that a file ID does not contain path traversal
+// sequences or other unsafe patterns that could escape the bucket keyspace.
+func validateFileID(fileID string) error {
+	if fileID == "" {
+		return fmt.Errorf("empty file ID")
+	}
+	key := strings.ReplaceAll(fileID, "|", "/")
+	if strings.HasPrefix(key, "/") {
+		return fmt.Errorf("absolute path in file ID")
+	}
+	for _, seg := range strings.Split(key, "/") {
+		if seg == ".." {
+			return fmt.Errorf("path traversal in file ID")
+		}
+	}
+	return nil
+}
+
 // fileIDToKey converts a WOPI file ID to an S3 object key.
-// File IDs use dots as path separators to be URL-safe.
+// File IDs use pipes as path separators to be URL-safe.
 func fileIDToKey(fileID string) string {
 	return strings.ReplaceAll(fileID, "|", "/")
 }

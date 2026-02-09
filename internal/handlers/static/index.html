@@ -168,8 +168,8 @@
 <div id="browser-view">
   <div id="toolbar">
     <div id="breadcrumbs"></div>
-    <button class="btn btn-primary" onclick="showUploadModal()">Upload</button>
-    <button class="btn" onclick="refreshListing()">Refresh</button>
+    <button class="btn btn-primary" data-action="upload">Upload</button>
+    <button class="btn" data-action="refresh">Refresh</button>
   </div>
   <table id="file-table">
     <thead>
@@ -182,7 +182,7 @@
 <!-- ── Editor View ── -->
 <div id="editor-view">
   <div id="editor-toolbar">
-    <a class="back-link" onclick="closeEditor()">&#8592; Back to Files</a>
+    <a class="back-link" href="#" data-action="close-editor">&#8592; Back to Files</a>
     <span class="file-name" id="editor-file-name"></span>
   </div>
   <div id="editor-frame"></div>
@@ -199,8 +199,8 @@
       <span class="attr-none">Loading...</span>
     </div>
     <div class="modal-actions">
-      <button class="btn" onclick="hideUploadModal()">Cancel</button>
-      <button class="btn btn-primary" id="upload-submit" onclick="submitUpload()">Upload</button>
+      <button class="btn" data-action="cancel-upload">Cancel</button>
+      <button class="btn btn-primary" id="upload-submit" data-action="submit-upload">Upload</button>
     </div>
   </div>
 </div>
@@ -218,6 +218,9 @@
   var editorView = document.getElementById('editor-view');
   var editorFrame = document.getElementById('editor-frame');
   var editorFileName = document.getElementById('editor-file-name');
+
+  // CSRF header required on all mutation requests to /api/.
+  var csrfHeaders = { 'X-Requested-With': 'XMLHttpRequest' };
 
   function showError(msg) {
     errorMsg.textContent = msg;
@@ -239,10 +242,16 @@
     return months[d.getMonth()] + ' ' + d.getDate() + ', ' + d.getFullYear();
   }
 
+  // Escape a string for safe inclusion in HTML text content.
   function escapeHtml(str) {
     var div = document.createElement('div');
     div.appendChild(document.createTextNode(str));
     return div.innerHTML;
+  }
+
+  // Escape a string for safe inclusion in an HTML attribute value (double-quoted).
+  function escapeAttr(str) {
+    return String(str).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
   // Strip .tdf wrapper extension for display (s4proxy decrypts transparently)
@@ -304,7 +313,7 @@
 
   // ── Breadcrumbs ──
   function renderBreadcrumbs() {
-    var html = '<a onclick="navigateToFolder(\'\')">Home</a>';
+    var html = '<a data-action="navigate" data-prefix="" href="#">Home</a>';
     if (currentPrefix) {
       var parts = currentPrefix.replace(/\/$/, '').split('/');
       var accum = '';
@@ -314,7 +323,7 @@
         if (i === parts.length - 1) {
           html += '<span>' + escapeHtml(parts[i]) + '</span>';
         } else {
-          html += '<a onclick="navigateToFolder(\'' + escapeHtml(accum) + '\')">' + escapeHtml(parts[i]) + '</a>';
+          html += '<a data-action="navigate" data-prefix="' + escapeAttr(accum) + '" href="#">' + escapeHtml(parts[i]) + '</a>';
         }
       }
     }
@@ -322,10 +331,10 @@
   }
 
   // ── Navigation ──
-  window.navigateToFolder = function(prefix) {
+  function navigateToFolder(prefix) {
     currentPrefix = prefix;
     loadListing();
-  };
+  }
 
   // ── Load file listing ──
   function loadListing() {
@@ -355,7 +364,7 @@
         listing.folders.forEach(function(f) {
           var tr = document.createElement('tr');
           tr.innerHTML =
-            '<td><span class="file-icon">' + folderIcon() + '</span><a class="file-link" onclick="navigateToFolder(\'' + escapeHtml(f.prefix) + '\')">' + escapeHtml(f.name) + '/</a></td>' +
+            '<td><span class="file-icon">' + folderIcon() + '</span><a class="file-link" data-action="navigate" data-prefix="' + escapeAttr(f.prefix) + '" href="#">' + escapeHtml(f.name) + '/</a></td>' +
             '<td class="size-col">\u2014</td>' +
             '<td class="date-col">\u2014</td>' +
             '<td class="actions-col"></td>';
@@ -364,18 +373,16 @@
 
         // Files
         listing.files.forEach(function(f) {
-          var fid = escapeHtml(f.file_id);
-          var fname = escapeHtml(displayName(f.name));
           var tr = document.createElement('tr');
           tr.setAttribute('data-file-id', f.file_id);
           tr.innerHTML =
-            '<td><span class="file-icon">' + fileIcon(f.name) + '</span><a class="file-link" onclick="openFile(\'' + fid + '\', \'' + fname + '\')">' + fname + '</a></td>' +
+            '<td><span class="file-icon">' + fileIcon(f.name) + '</span><a class="file-link" data-action="open" data-file-id="' + escapeAttr(f.file_id) + '" data-file-name="' + escapeAttr(displayName(f.name)) + '" href="#">' + escapeHtml(displayName(f.name)) + '</a></td>' +
             '<td class="size-col">' + formatSize(f.size) + '</td>' +
             '<td class="date-col">' + formatDate(f.last_modified) + '</td>' +
             '<td class="actions-col">' +
-              '<button class="action-btn" title="Info" onclick="toggleInfo(\'' + fid + '\', this)">&#9432;</button>' +
-              '<button class="action-btn" title="Download" onclick="downloadFile(\'' + fid + '\')">&#11015;</button>' +
-              '<button class="action-btn delete-btn" title="Delete" onclick="confirmDelete(\'' + fid + '\', this)">&#128465;</button>' +
+              '<button class="action-btn" title="Info" data-action="info" data-file-id="' + escapeAttr(f.file_id) + '">&#9432;</button>' +
+              '<button class="action-btn" title="Download" data-action="download" data-file-id="' + escapeAttr(f.file_id) + '">&#11015;</button>' +
+              '<button class="action-btn delete-btn" title="Delete" data-action="delete" data-file-id="' + escapeAttr(f.file_id) + '">&#128465;</button>' +
             '</td>';
           fileBody.appendChild(tr);
         });
@@ -383,17 +390,15 @@
       .catch(function(err) { showError(err.message); });
   }
 
-  window.refreshListing = function() { loadListing(); };
-
   // ── Download file ──
-  window.downloadFile = function(fileId) {
+  function downloadFile(fileId) {
     window.location.href = '/api/files/download?file_id=' + encodeURIComponent(fileId);
-  };
+  }
 
   // ── Toggle info panel ──
-  window.toggleInfo = function(fileId, btn) {
+  function toggleInfo(fileId, btn) {
     // If already open for this file, close it
-    var existingRow = document.getElementById('info-row-' + fileId);
+    var existingRow = document.getElementById('info-row-' + CSS.escape(fileId));
     if (existingRow) {
       existingRow.remove();
       openInfoId = null;
@@ -450,10 +455,10 @@
         var panel = infoTr.querySelector('.info-panel');
         if (panel) panel.innerHTML = '<span style="color:var(--vds-red-darker)">Failed to load info</span>';
       });
-  };
+  }
 
   // ── Open file in editor ──
-  window.openFile = function(fileId, name) {
+  function openFile(fileId, name) {
     browserView.style.display = 'none';
     editorView.style.display = 'flex';
     editorFileName.textContent = name;
@@ -477,17 +482,17 @@
         showError(err.message);
         closeEditor();
       });
-  };
+  }
 
-  window.closeEditor = function() {
+  function closeEditor() {
     editorView.style.display = 'none';
     browserView.style.display = '';
     editorFrame.innerHTML = '';
     loadListing();
-  };
+  }
 
   // ── Delete with inline confirm ──
-  window.confirmDelete = function(fileId, btn) {
+  function confirmDelete(fileId, btn) {
     // If already confirming this file, execute delete
     if (deleteConfirmId === fileId) {
       executeDelete(fileId);
@@ -495,37 +500,34 @@
     }
 
     // Reset any previous confirm
-    resetDeleteConfirm();
     deleteConfirmId = fileId;
 
     var td = btn.parentElement;
-    td.innerHTML = '<div class="confirm-row"><span class="confirm-text">Sure?</span><button class="btn btn-danger" style="padding:2px 8px;font-size:12px" onclick="executeDelete(\'' + escapeHtml(fileId) + '\')">Delete</button><button class="btn" style="padding:2px 8px;font-size:12px" onclick="resetDeleteConfirm(); refreshListing();">No</button></div>';
-  };
+    td.innerHTML = '<div class="confirm-row"><span class="confirm-text">Sure?</span>' +
+      '<button class="btn btn-danger" style="padding:2px 8px;font-size:12px" data-action="execute-delete" data-file-id="' + escapeAttr(fileId) + '">Delete</button>' +
+      '<button class="btn" style="padding:2px 8px;font-size:12px" data-action="cancel-delete">No</button></div>';
+  }
 
-  window.executeDelete = function(fileId) {
-    fetch('/api/files?file_id=' + encodeURIComponent(fileId), { method: 'DELETE' })
+  function executeDelete(fileId) {
+    fetch('/api/files?file_id=' + encodeURIComponent(fileId), { method: 'DELETE', headers: csrfHeaders })
       .then(function(r) {
         if (r.status === 401) { window.location.href = '/'; return; }
         if (!r.ok) throw new Error('Failed to delete file');
         loadListing();
       })
       .catch(function(err) { showError(err.message); });
-  };
-
-  window.resetDeleteConfirm = function() {
-    deleteConfirmId = null;
-  };
+  }
 
   // ── Upload Modal ──
-  window.showUploadModal = function() {
+  function showUploadModal() {
     document.getElementById('upload-modal').classList.add('active');
     document.getElementById('upload-file').value = '';
     loadAttributes();
-  };
+  }
 
-  window.hideUploadModal = function() {
+  function hideUploadModal() {
     document.getElementById('upload-modal').classList.remove('active');
-  };
+  }
 
   function loadAttributes() {
     var attrListEl = document.getElementById('attr-list');
@@ -562,7 +564,7 @@
       });
   }
 
-  window.submitUpload = function() {
+  function submitUpload() {
     var fileInput = document.getElementById('upload-file');
     if (!fileInput.files || !fileInput.files[0]) {
       showError('Please select a file');
@@ -584,7 +586,7 @@
     submitBtn.disabled = true;
     submitBtn.textContent = 'Uploading...';
 
-    fetch('/api/files/upload', { method: 'POST', body: formData })
+    fetch('/api/files/upload', { method: 'POST', body: formData, headers: csrfHeaders })
       .then(function(r) {
         if (r.status === 401) { window.location.href = '/'; return; }
         if (!r.ok) throw new Error('Upload failed');
@@ -599,9 +601,61 @@
         submitBtn.disabled = false;
         submitBtn.textContent = 'Upload';
       });
-  };
+  }
 
-  // ── Init ──
+  // ── Delegated click handler ──
+  // All interactive elements use data-action attributes instead of inline
+  // onclick handlers, eliminating XSS via JavaScript context injection.
+  document.addEventListener('click', function(e) {
+    var el = e.target.closest('[data-action]');
+    if (!el) return;
+
+    var action = el.dataset.action;
+    switch (action) {
+      case 'navigate':
+        e.preventDefault();
+        navigateToFolder(el.dataset.prefix);
+        break;
+      case 'open':
+        e.preventDefault();
+        openFile(el.dataset.fileId, el.dataset.fileName);
+        break;
+      case 'info':
+        toggleInfo(el.dataset.fileId, el);
+        break;
+      case 'download':
+        downloadFile(el.dataset.fileId);
+        break;
+      case 'delete':
+        confirmDelete(el.dataset.fileId, el);
+        break;
+      case 'execute-delete':
+        executeDelete(el.dataset.fileId);
+        break;
+      case 'cancel-delete':
+        deleteConfirmId = null;
+        loadListing();
+        break;
+      case 'upload':
+        showUploadModal();
+        break;
+      case 'refresh':
+        loadListing();
+        break;
+      case 'cancel-upload':
+        hideUploadModal();
+        break;
+      case 'submit-upload':
+        submitUpload();
+        break;
+      case 'close-editor':
+        e.preventDefault();
+        closeEditor();
+        break;
+    }
+  });
+
+  // ── Init ─���
   loadListing();
 })();
 </script>

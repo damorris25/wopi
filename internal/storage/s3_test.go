@@ -613,3 +613,95 @@ func TestS3Storage_PutFileWithMetadata_NoMetadata(t *testing.T) {
 		t.Errorf("expected nil metadata, got %v", obj.metadata)
 	}
 }
+
+func TestValidateFileID(t *testing.T) {
+	tests := []struct {
+		fileID  string
+		wantErr bool
+	}{
+		{"doc.txt", false},
+		{"folder|doc.txt", false},
+		{"a|b|c.txt", false},
+		{"", true},                        // empty
+		{"..|secret.txt", true},           // traversal at start
+		{"folder|..|secret.txt", true},    // traversal in middle
+		{"folder|sub|..", true},           // traversal at end
+		{"/etc/passwd", true},             // absolute path
+	}
+
+	for _, tt := range tests {
+		err := validateFileID(tt.fileID)
+		if tt.wantErr && err == nil {
+			t.Errorf("validateFileID(%q) = nil, want error", tt.fileID)
+		}
+		if !tt.wantErr && err != nil {
+			t.Errorf("validateFileID(%q) = %v, want nil", tt.fileID, err)
+		}
+	}
+}
+
+func TestS3Storage_PathTraversal_GetFileInfo(t *testing.T) {
+	mock := newMockS3Client()
+	store := NewS3StorageWithClient(mock, "test-bucket")
+
+	_, err := store.GetFileInfo(context.Background(), "..|..|secret")
+	if err == nil {
+		t.Error("expected error for path traversal in GetFileInfo")
+	}
+}
+
+func TestS3Storage_PathTraversal_GetFile(t *testing.T) {
+	mock := newMockS3Client()
+	store := NewS3StorageWithClient(mock, "test-bucket")
+
+	_, _, err := store.GetFile(context.Background(), "folder|..|secret")
+	if err == nil {
+		t.Error("expected error for path traversal in GetFile")
+	}
+}
+
+func TestS3Storage_PathTraversal_PutFile(t *testing.T) {
+	mock := newMockS3Client()
+	store := NewS3StorageWithClient(mock, "test-bucket")
+
+	_, err := store.PutFile(context.Background(), "..|secret", strings.NewReader("data"), 4)
+	if err == nil {
+		t.Error("expected error for path traversal in PutFile")
+	}
+}
+
+func TestS3Storage_PathTraversal_DeleteFile(t *testing.T) {
+	mock := newMockS3Client()
+	store := NewS3StorageWithClient(mock, "test-bucket")
+
+	err := store.DeleteFile(context.Background(), "..|secret")
+	if err == nil {
+		t.Error("expected error for path traversal in DeleteFile")
+	}
+}
+
+func TestS3Storage_RenameFile_InvalidNewName(t *testing.T) {
+	mock := newMockS3Client()
+	mock.objects["folder/doc.txt"] = &mockObject{data: []byte("data"), contentType: "text/plain", etag: "e1"}
+	store := NewS3StorageWithClient(mock, "test-bucket")
+
+	tests := []struct {
+		name    string
+		newName string
+	}{
+		{"traversal", "../../secret"},
+		{"slash", "sub/file.txt"},
+		{"pipe", "sub|file.txt"},
+		{"backslash", "sub\\file.txt"},
+		{"dotdot", ".."},
+		{"dot", "."},
+		{"empty", ""},
+	}
+
+	for _, tt := range tests {
+		_, err := store.RenameFile(context.Background(), "folder|doc.txt", tt.newName)
+		if err == nil {
+			t.Errorf("RenameFile with newName=%q (%s): expected error", tt.newName, tt.name)
+		}
+	}
+}

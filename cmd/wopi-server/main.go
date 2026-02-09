@@ -31,6 +31,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Warn about insecure defaults.
+	if cfg.AccessTokenSecret == "change-me-in-production" {
+		if !cfg.OIDCEnabled {
+			logger.Error("WOPI_ACCESS_TOKEN_SECRET is at its default value and the /token endpoint is exposed — tokens can be forged by anyone. Set a strong random secret.")
+			os.Exit(1)
+		}
+		logger.Warn("WOPI_ACCESS_TOKEN_SECRET is at its default value — set a strong random secret before deploying to production")
+	}
+	if cfg.TDFInsecureSkipVerify {
+		logger.Warn("TDF_INSECURE_SKIP_VERIFY is enabled — TLS certificate verification is disabled for the OpenTDF SDK connection")
+	}
+
 	ctx := context.Background()
 	s3Cfg := storage.S3Config{
 		Endpoint:       cfg.S3Endpoint,
@@ -89,6 +101,7 @@ func main() {
 			ClientID:               cfg.S3BearerClientID,
 			ClientSecret:           cfg.S3BearerClientSecret,
 			FulfillableObligations: cfg.TDFFulfillableObligationFQNs,
+			InsecureSkipVerify:     cfg.TDFInsecureSkipVerify,
 			Logger:                 logger,
 		})
 		if err != nil {
@@ -177,9 +190,11 @@ func main() {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 
-	// Token generation endpoint — disabled when OIDC is enabled
+	// Token generation endpoint — disabled when OIDC is enabled.
+	// Rate-limited to 10 requests per minute per IP to prevent abuse.
 	if !cfg.OIDCEnabled {
-		mux.HandleFunc("POST /token", func(w http.ResponseWriter, r *http.Request) {
+		tokenRL := middleware.NewRateLimiter(10, 1*time.Minute)
+		tokenHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			userID := r.URL.Query().Get("user_id")
 			fileID := r.URL.Query().Get("file_id")
 			if userID == "" || fileID == "" {
@@ -190,6 +205,7 @@ func main() {
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprintf(w, `{"access_token":"%s","access_token_ttl":%d}`, token, middleware.TokenTTL())
 		})
+		mux.Handle("POST /token", middleware.RateLimit(tokenRL)(tokenHandler))
 	}
 
 	// WOPI endpoints (with HMAC auth middleware — unchanged)
@@ -207,9 +223,12 @@ func main() {
 	mux.Handle("POST /wopi/files/{file_id}/contents", logMiddleware(authMiddleware(http.HandlerFunc(h.ContentsHandler))))
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
+	var handler http.Handler = mux
+	handler = middleware.CSRFProtect(handler)
+	handler = middleware.SecureHeaders(handler)
 	server := &http.Server{
 		Addr:         addr,
-		Handler:      mux,
+		Handler:      handler,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  120 * time.Second,

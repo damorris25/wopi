@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -40,17 +41,26 @@ func (tv *TokenValidator) GenerateToken(userID, fileID string) string {
 }
 
 // GenerateTokenWithTimestamp creates a token with a specific timestamp (useful for testing).
+// The token is base64url-encoded to prevent user IDs from being visible in
+// URL query parameters, server logs, and browser history.
 func (tv *TokenValidator) GenerateTokenWithTimestamp(userID, fileID string, timestamp int64) string {
 	payload := fmt.Sprintf("%s:%s:%d", userID, fileID, timestamp)
 	mac := hmac.New(sha256.New, tv.secret)
 	mac.Write([]byte(payload))
 	sig := hex.EncodeToString(mac.Sum(nil))
-	return fmt.Sprintf("%s:%s:%d", sig, userID, timestamp)
+	raw := fmt.Sprintf("%s:%s:%d", sig, userID, timestamp)
+	return base64.RawURLEncoding.EncodeToString([]byte(raw))
 }
 
 // ValidateToken verifies a token and returns the user ID if valid.
 func (tv *TokenValidator) ValidateToken(token, fileID string) (userID string, valid bool) {
-	parts := strings.SplitN(token, ":", 3)
+	// Decode base64url envelope.
+	raw, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil {
+		return "", false
+	}
+
+	parts := strings.SplitN(string(raw), ":", 3)
 	if len(parts) != 3 {
 		return "", false
 	}

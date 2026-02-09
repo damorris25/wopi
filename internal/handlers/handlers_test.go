@@ -1236,6 +1236,76 @@ func TestPutRelativeFile_SuggestedTarget(t *testing.T) {
 	}
 }
 
+func TestPutRelativeFile_PreservesDirectory(t *testing.T) {
+	h, mock := newTestHandler()
+
+	mock.objects["docs/original.docx"] = &mockObject{data: []byte("orig"), etag: "v1"}
+
+	content := []byte("saved-as content")
+	req := requestWithContext(http.MethodPost, "/wopi/files/docs|original.docx", bytes.NewReader(content), "docs|original.docx", "user1")
+	req.Header.Set(wopi.HeaderOverride, wopi.OverridePutRelative)
+	req.Header.Set(wopi.HeaderRelativeTarget, "copy.docx")
+	req.ContentLength = int64(len(content))
+	rec := httptest.NewRecorder()
+
+	h.PutRelativeFile(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// The new file should be created in the same directory as the source.
+	if _, exists := mock.objects["docs/copy.docx"]; !exists {
+		t.Error("expected docs/copy.docx to be stored (directory preserved)")
+	}
+}
+
+func TestPutRelativeFile_StripsTargetPath(t *testing.T) {
+	h, mock := newTestHandler()
+
+	mock.objects["original.docx"] = &mockObject{data: []byte("orig"), etag: "v1"}
+
+	content := []byte("content")
+	req := requestWithContext(http.MethodPost, "/wopi/files/original.docx", bytes.NewReader(content), "original.docx", "user1")
+	req.Header.Set(wopi.HeaderOverride, wopi.OverridePutRelative)
+	req.Header.Set(wopi.HeaderRelativeTarget, "other/dir/malicious.docx")
+	req.ContentLength = int64(len(content))
+	rec := httptest.NewRecorder()
+
+	h.PutRelativeFile(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Only the base name should be used, stripping directory components.
+	if _, exists := mock.objects["malicious.docx"]; !exists {
+		t.Error("expected malicious.docx stored at root (path components stripped)")
+	}
+	if _, exists := mock.objects["other/dir/malicious.docx"]; exists {
+		t.Error("should NOT store at other/dir/malicious.docx")
+	}
+}
+
+func TestPutRelativeFile_RejectsInvalidTarget(t *testing.T) {
+	h, _ := newTestHandler()
+
+	for _, target := range []string{"..", ".", ""} {
+		content := []byte("data")
+		req := requestWithContext(http.MethodPost, "/wopi/files/original.docx", bytes.NewReader(content), "original.docx", "user1")
+		req.Header.Set(wopi.HeaderOverride, wopi.OverridePutRelative)
+		req.Header.Set(wopi.HeaderRelativeTarget, target)
+		req.ContentLength = int64(len(content))
+		rec := httptest.NewRecorder()
+
+		h.PutRelativeFile(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("target %q: expected 400, got %d", target, rec.Code)
+		}
+	}
+}
+
 func TestPutRelativeFile_MissingTarget(t *testing.T) {
 	h, _ := newTestHandler()
 

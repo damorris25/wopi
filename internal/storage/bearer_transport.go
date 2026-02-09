@@ -60,7 +60,7 @@ func (t *BearerTokenTransport) RoundTrip(req *http.Request) (*http.Response, err
 	if userToken, ok := req.Context().Value(BearerTokenContextKey).(string); ok && userToken != "" {
 		token = userToken
 		if t.Logger != nil {
-			t.Logger.Info("S3 request using per-user token", "method", req.Method, "url", req.URL.String())
+			t.Logger.Info("S3 request using per-user token", "method", req.Method, "path", req.URL.Path)
 		}
 	} else {
 		// Fall back to service-account token via client_credentials.
@@ -70,7 +70,7 @@ func (t *BearerTokenTransport) RoundTrip(req *http.Request) (*http.Response, err
 			return nil, fmt.Errorf("obtain bearer token: %w", err)
 		}
 		if t.Logger != nil {
-			t.Logger.Info("S3 request using service-account token", "method", req.Method, "url", req.URL.String())
+			t.Logger.Info("S3 request using service-account token", "method", req.Method, "path", req.URL.Path)
 		}
 	}
 
@@ -103,7 +103,7 @@ func (t *BearerTokenTransport) getToken() (string, error) {
 		"client_secret": {t.ClientSecret},
 	}
 
-	resp, err := (&http.Client{Transport: t.base()}).Post(
+	resp, err := (&http.Client{Transport: t.base(), Timeout: 30 * time.Second}).Post(
 		t.TokenURL,
 		"application/x-www-form-urlencoded",
 		strings.NewReader(data.Encode()),
@@ -113,7 +113,7 @@ func (t *BearerTokenTransport) getToken() (string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MB limit
 	if err != nil {
 		return "", fmt.Errorf("read token response: %w", err)
 	}

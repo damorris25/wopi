@@ -3,6 +3,7 @@ package middleware
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -38,8 +39,13 @@ func NewSessionManager(secret string, maxAge time.Duration, secure bool) (*Sessi
 		return nil, errors.New("session secret must not be empty")
 	}
 
-	// Derive a 32-byte key from the secret using SHA-256.
-	hash := sha256.Sum256([]byte(secret))
+	// Derive a 32-byte key from the secret using HMAC-SHA256 with a
+	// domain-specific salt. This is equivalent to HKDF-Extract and provides
+	// proper key derivation with domain separation.
+	mac := hmac.New(sha256.New, []byte("wopi-session-key-v1"))
+	mac.Write([]byte(secret))
+	var hash [32]byte
+	copy(hash[:], mac.Sum(nil))
 	block, err := aes.NewCipher(hash[:])
 	if err != nil {
 		return nil, fmt.Errorf("create AES cipher: %w", err)

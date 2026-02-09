@@ -629,6 +629,7 @@ services:
       SESSION_SECRET: "opentdf-wopi-session-secret-32b"
       PLATFORM_ENDPOINT: "https://platform.opentdf.local:8443"
       TDF_FULFILLABLE_OBLIGATION_FQNS: "https://example.com/obl/document-controls/value/no-download,https://example.com/obl/document-controls/value/no-copy,https://example.com/obl/document-controls/value/no-print"
+      TDF_INSECURE_SKIP_VERIFY: "true"  # Development only — self-signed certs
     volumes:
       - platform_certs:/etc/ssl/certs:ro
     extra_hosts:

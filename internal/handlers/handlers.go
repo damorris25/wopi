@@ -557,7 +557,7 @@ func (h *Handler) GetEditorURL(w http.ResponseWriter, r *http.Request) {
 		url.QueryEscape(token),
 	)
 
-	h.Logger.Info("editor URL generated", "file_id", fileID, "user_id", userID, "wopi_src", wopiSrc, "editor_url", editorURL)
+	h.Logger.Info("editor URL generated", "file_id", fileID, "user_id", userID, "wopi_src", wopiSrc)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"editor_url": editorURL})
@@ -581,9 +581,23 @@ func (h *Handler) PutRelativeFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Derive new file ID from current file's directory + target name
-	_ = fileID
-	newFileID := targetName // Simplified: use target name as new file ID
+	// Derive new file ID from current file's directory + base name of target.
+	// The source file ID uses "|" as a path separator (e.g. "folder|doc.docx"),
+	// so we extract the directory prefix and append only the base name of the
+	// target to prevent writing files to unexpected directories.
+	baseName := targetName
+	if idx := strings.LastIndexAny(baseName, "/\\|"); idx >= 0 {
+		baseName = baseName[idx+1:]
+	}
+	if baseName == "" || baseName == "." || baseName == ".." {
+		http.Error(w, "invalid target name", http.StatusBadRequest)
+		return
+	}
+	dirPrefix := ""
+	if idx := strings.LastIndex(fileID, "|"); idx >= 0 {
+		dirPrefix = fileID[:idx+1]
+	}
+	newFileID := dirPrefix + baseName
 
 	version, err := h.Storage.PutFile(ctx, newFileID, r.Body, r.ContentLength)
 	if err != nil {
@@ -619,8 +633,12 @@ func (h *Handler) ListFilesInFolder(w http.ResponseWriter, r *http.Request) {
 // UploadFile handles POST /api/files/upload — accepts multipart form with file, prefix, and attributes.
 func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 	ctx := h.withUserToken(r.Context())
-	if err := r.ParseMultipartForm(64 << 20); err != nil { // 64 MB max
-		http.Error(w, "failed to parse form: "+err.Error(), http.StatusBadRequest)
+
+	// Enforce request body limit before parsing to prevent memory exhaustion.
+	r.Body = http.MaxBytesReader(w, r.Body, 256<<20) // 256 MB
+
+	if err := r.ParseMultipartForm(64 << 20); err != nil { // 64 MB in-memory buffer
+		http.Error(w, "request too large or invalid form data", http.StatusBadRequest)
 		return
 	}
 

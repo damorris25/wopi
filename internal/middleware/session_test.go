@@ -164,6 +164,37 @@ func TestClearSession(t *testing.T) {
 	}
 }
 
+func TestSessionDifferentSecrets(t *testing.T) {
+	sm1, err := NewSessionManager("secret-alpha", 1*time.Hour, false)
+	if err != nil {
+		t.Fatalf("NewSessionManager 1: %v", err)
+	}
+	sm2, err := NewSessionManager("secret-beta", 1*time.Hour, false)
+	if err != nil {
+		t.Fatalf("NewSessionManager 2: %v", err)
+	}
+
+	data := &SessionData{
+		UserID:    "user-123",
+		ExpiresAt: time.Now().Add(1 * time.Hour),
+	}
+
+	// Set session with sm1.
+	w := httptest.NewRecorder()
+	if err := sm1.SetSession(w, data); err != nil {
+		t.Fatalf("SetSession: %v", err)
+	}
+
+	// Try to read with sm2 — should fail.
+	req := httptest.NewRequest("GET", "/", nil)
+	req.AddCookie(w.Result().Cookies()[0])
+
+	_, err = sm2.GetSession(req)
+	if err == nil {
+		t.Fatal("expected error when reading session with different secret")
+	}
+}
+
 func TestNewSessionManagerEmptySecret(t *testing.T) {
 	_, err := NewSessionManager("", 1*time.Hour, false)
 	if err == nil {

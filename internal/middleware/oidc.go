@@ -279,7 +279,7 @@ func (om *OIDCMiddleware) LogoutHandler(w http.ResponseWriter, r *http.Request) 
 }
 
 func randomState() (string, error) {
-	b := make([]byte, 16)
+	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
